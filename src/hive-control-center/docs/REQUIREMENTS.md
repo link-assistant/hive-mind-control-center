@@ -27,7 +27,8 @@ Update it whenever a requirement is added, changed, or completed.
 - [ ] Keep photos, video, documents, and avatars working end to end; a document is verified through the API, but photo/video/avatar transfers are not yet tested.
 - [x] Explain the large idle client-connection count: server inspection showed 994 established sockets, 842 inbound client sockets and 144 outbound Telegram DC sockets. Restarting the proxy cleared the backlog.
 - [ ] Mitigate the idle client-connection backlog and the stalled media sends without changing the client network.
-- [ ] Find a transport that survives this client network for media without switching networks (TLS-camouflaged/FakeTLS transport is the next candidate).
+- [x] Evaluate a TLS-camouflaged/FakeTLS transport on port 443 without switching networks; mtg with `contabo.com` fronting did not complete text, so it was rolled back.
+- [ ] Find another transport that survives this client network for media, or document that no in-network transport completes media.
 
 ## Diagnostics and verification
 
@@ -71,4 +72,5 @@ Update it whenever a requirement is added, changed, or completed.
 - 2026-11-08: remote inspection found 994 established sockets: 842 inbound clients and 144 outbound Telegram DC sockets. The 2019 `/run.sh` hardcodes `-C 60000` and asks for 65552 open files; recreating the container with an explicit `--ulimit nofile=524288:524288` kept it stable (a hard limit of 65536 makes it crash-loop). Restarting cleared the backlog.
 - 2026-11-08: text re-verified after the restart (`API_TEST_SENT=yes saved_messages_verified=yes`), but media still stalled with the same ping timeouts.
 - 2026-11-08: `telegrammessenger/proxy:2.0beta` (April 2026 build) was tested on port 8443 with the same secret. It produced the same ping timeouts, so the proxy binary/version is not the cause. The test container and its secret copy were removed.
-- 2026-11-08: the common variable left is the client network path (DPI/throttling of large MTProto transfers); direct DC connections also fail. Next transport candidate is TLS camouflage/FakeTLS, not a network switch.
+- 2026-11-08: the common variable left is the client network path (DPI/throttling of large MTProto transfers); direct DC connections also fail.
+- 2026-11-08: FakeTLS/mtg on port 443 (`ee` secret with `contabo.com` fronting) connected but text did not complete; it was rolled back to classic. Classic text passed again after a retry. FakeTLS is not the answer on this network.

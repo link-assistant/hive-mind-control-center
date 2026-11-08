@@ -40,9 +40,12 @@ backlog and text passed again, but media still stalled.
 A current `telegrammessenger/proxy:2.0beta` image (April 2026 build) was also
 tested on port 8443 with the same secret. It produced the same ping timeouts, so
 the proxy binary/version is not the cause. The common variable is the client
-network path, which also blocks direct DC connections. The next candidate is a
-TLS-camouflaged/FakeTLS transport that survives this network; switching networks
-is explicitly out of scope.
+network path, which also blocks direct DC connections.
+
+A TLS-camouflaged/FakeTLS transport was then tested on port 443: `mtg 2.3.0`
+with an `ee` secret using `contabo.com` fronting. It accepted the connection but
+text did not complete, so it was rolled back to the classic container. Classic
+text passed again after a retry. Switching networks is explicitly out of scope.
 
 Current status: messages work, media upload/download does not complete from this
 client network. This is not a passing photo/media verification.

@@ -41,7 +41,7 @@ Saved Messages, reads it back, and prints only status lines (never credentials).
 Options:
   --host <host>             Proxy host (default: MTPROXY_HOST or SERVER_IP in .lenv)
   --port <port>             Proxy port (default: MTPROXY_PORT or 443)
-  --secret <hex>            32-hex proxy key (prefer MTPROXY_SECRET_KEY)
+  --secret <value>          32-hex proxy key or full ee... FakeTLS secret
   --secret-file <path>      File containing the 32-hex proxy key
   --env-file <path>         Telegram credentials .env file
   --session-file <path>     GramJS StringSession file
@@ -103,16 +103,18 @@ if (!options.secret && options.appConfig) {
   const proxy = appConfig.proxy && typeof appConfig.proxy === 'object' ? appConfig.proxy : appConfig;
   const encoded = String(proxy.secret ?? '');
   const hex = Buffer.from(encoded, 'base64').toString('hex');
-  options.secret = ['dd', 'ee'].includes(hex.slice(0, 2).toLowerCase()) ? hex.slice(2) : hex;
+  const prefix = hex.slice(0, 2).toLowerCase();
+  options.secret = prefix === 'ee' ? hex : prefix === 'dd' ? hex.slice(2) : hex;
 }
 options.secret = options.secret.trim();
+const isFakeTls = /^ee[0-9a-f]{32}[0-9a-f]+$/i.test(options.secret);
 if (!options.noProxy) {
   if (!options.host) throw new Error('proxy host is required (--host or SERVER_IP in .lenv)');
   if (!/^[0-9]+$/.test(options.port) || Number(options.port) < 1 || Number(options.port) > 65535) {
     throw new Error(`invalid proxy port: ${options.port}`);
   }
-  if (!/^[0-9a-f]{32}$/i.test(options.secret)) {
-    throw new Error('proxy secret must be a 32-hex key (set MTPROXY_SECRET_KEY or --secret-file)');
+  if (!isFakeTls && !/^[0-9a-f]{32}$/i.test(options.secret)) {
+    throw new Error('proxy secret must be a 32-hex key or a full ee... FakeTLS secret');
   }
 }
 
@@ -152,7 +154,7 @@ const client = new TelegramClient(
             ip: options.host,
             port: Number(options.port),
             MTProxy: true,
-            secret: `dd${options.secret}`,
+            secret: isFakeTls ? options.secret.toLowerCase() : `dd${options.secret}`,
           },
         }),
   },
