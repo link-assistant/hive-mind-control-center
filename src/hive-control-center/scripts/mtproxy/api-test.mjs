@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 import { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { dirname, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { createSolidPng, decodePng, isPng } from './solid-photo.mjs';
 
 const require = createRequire(import.meta.url);
 const { TelegramClient, sessions, Api } = require('teleproto');
@@ -25,6 +28,11 @@ const options = {
   media: process.env.MTPROXY_API_MEDIA === '1',
   receiveMedia: process.env.MTPROXY_API_RECEIVE_MEDIA === '1',
   receiveProfile: process.env.MTPROXY_API_RECEIVE_PROFILE || '',
+  roundtripPhoto: process.env.MTPROXY_API_ROUNDTRIP_PHOTO === '1',
+  photoSize: Number(process.env.MTPROXY_API_PHOTO_SIZE || '128'),
+  photoColor: process.env.MTPROXY_API_PHOTO_COLOR || '',
+  photoTolerance: Number(process.env.MTPROXY_API_PHOTO_TOLERANCE || '8'),
+  photoTimeout: Number(process.env.MTPROXY_API_PHOTO_TIMEOUT_MS || '60000'),
   chat: process.env.MTPROXY_API_CHAT || '@telegram',
   receiveLimit: Number(process.env.MTPROXY_API_RECEIVE_LIMIT || '50'),
   relaxPing: process.env.MTPROXY_API_RELAX_PING === '1',
@@ -59,6 +67,11 @@ Options:
   --media                   Also upload and download a small document
   --receive-media           Download the latest photo from --chat (receive only)
   --receive-profile <peer>  Download a profile photo (receive-only diagnostic)
+  --roundtrip-photo         Send a random solid-color PNG as a photo, receive it, verify color
+  --photo-size <n>          Round-trip photo size in pixels (default: 128)
+  --photo-color <r,g,b>     Fixed round-trip color instead of a random one
+  --photo-tolerance <n>     Allowed per-channel color delta (default: 8)
+  --photo-timeout <ms>      Per-step round-trip timeout (default: 60000)
   --chat <peer>             Chat for --receive-media (default: @telegram)
   --receive-limit <n>       Messages to scan for a photo (default: 50)
   --relax-ping              Raise the diagnostic ping timeout (slow media)
@@ -83,13 +96,21 @@ The session file must belong to the same API ID/hash. Never commit .env,
   else if (arg === '--media') options.media = true;
   else if (arg === '--receive-media') options.receiveMedia = true;
   else if (arg === '--receive-profile') options.receiveProfile = next();
+  else if (arg === '--roundtrip-photo') options.roundtripPhoto = true;
+  else if (arg === '--photo-size') options.photoSize = Number(next());
+  else if (arg === '--photo-color') options.photoColor = next();
+  else if (arg === '--photo-tolerance') options.photoTolerance = Number(next());
+  else if (arg === '--photo-timeout') options.photoTimeout = Number(next());
   else if (arg === '--chat') options.chat = next();
   else if (arg === '--receive-limit') options.receiveLimit = Number(next());
   else if (arg === '--relax-ping') options.relaxPing = true;
   else throw new Error(`unknown option: ${arg}`);
 }
 
-const trim = (value) => String(value ?? '').trim().replace(/^['"]|['"]$/g, '');
+const trim = (value) =>
+  String(value ?? '')
+    .trim()
+    .replace(/^['"]|['"]$/g, '');
 const parseEnv = (file) => {
   const values = {};
   for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
@@ -115,7 +136,10 @@ if (!options.secret && options.secretFile) {
 }
 if (!options.secret && options.appConfig) {
   const appConfig = JSON.parse(readFileSync(options.appConfig, 'utf8'));
-  const proxy = appConfig.proxy && typeof appConfig.proxy === 'object' ? appConfig.proxy : appConfig;
+  const proxy =
+    appConfig.proxy && typeof appConfig.proxy === 'object'
+      ? appConfig.proxy
+      : appConfig;
   const encoded = String(proxy.secret ?? '');
   const hex = Buffer.from(encoded, 'base64').toString('hex');
   const prefix = hex.slice(0, 2).toLowerCase();
@@ -124,12 +148,19 @@ if (!options.secret && options.appConfig) {
 options.secret = options.secret.trim();
 const isFakeTls = /^ee[0-9a-f]{32}[0-9a-f]+$/i.test(options.secret);
 if (!options.noProxy) {
-  if (!options.host) throw new Error('proxy host is required (--host or SERVER_IP in .lenv)');
-  if (!/^[0-9]+$/.test(options.port) || Number(options.port) < 1 || Number(options.port) > 65535) {
+  if (!options.host)
+    throw new Error('proxy host is required (--host or SERVER_IP in .lenv)');
+  if (
+    !/^[0-9]+$/.test(options.port) ||
+    Number(options.port) < 1 ||
+    Number(options.port) > 65535
+  ) {
     throw new Error(`invalid proxy port: ${options.port}`);
   }
   if (!isFakeTls && !/^[0-9a-f]{32}$/i.test(options.secret)) {
-    throw new Error('proxy secret must be a 32-hex key or a full ee... FakeTLS secret');
+    throw new Error(
+      'proxy secret must be a 32-hex key or a full ee... FakeTLS secret'
+    );
   }
 }
 
@@ -137,14 +168,55 @@ const env = options.envFile ? parseEnv(resolve(options.envFile)) : {};
 options.apiId = trim(options.apiId || env.TELEGRAM_API_ID);
 options.apiHash = trim(options.apiHash || env.TELEGRAM_API_HASH);
 options.sessionFile = trim(
-  options.sessionFile || (options.envFile ? resolve(dirname(options.envFile), '.telegram_session') : ''),
+  options.sessionFile ||
+    (options.envFile
+      ? resolve(dirname(options.envFile), '.telegram_session')
+      : '')
 );
 if (!options.apiId || !options.apiHash) {
-  throw new Error('Telegram API ID/hash are required (--env-file or TELEGRAM_API_ID/TELEGRAM_API_HASH)');
+  throw new Error(
+    'Telegram API ID/hash are required (--env-file or TELEGRAM_API_ID/TELEGRAM_API_HASH)'
+  );
 }
-if (!options.sessionFile) throw new Error('session file is required (--session-file or TELEGRAM_SESSION_FILE)');
-if (!Number.isInteger(options.receiveLimit) || options.receiveLimit < 1 || options.receiveLimit > 200) {
+if (!options.sessionFile)
+  throw new Error(
+    'session file is required (--session-file or TELEGRAM_SESSION_FILE)'
+  );
+if (
+  !Number.isInteger(options.receiveLimit) ||
+  options.receiveLimit < 1 ||
+  options.receiveLimit > 200
+) {
   throw new Error(`invalid receive limit: ${options.receiveLimit}`);
+}
+if (
+  !Number.isInteger(options.photoSize) ||
+  options.photoSize < 8 ||
+  options.photoSize > 512
+) {
+  throw new Error(`invalid photo size: ${options.photoSize}`);
+}
+if (
+  !Number.isInteger(options.photoTolerance) ||
+  options.photoTolerance < 0 ||
+  options.photoTolerance > 255
+) {
+  throw new Error(`invalid photo tolerance: ${options.photoTolerance}`);
+}
+if (!Number.isInteger(options.photoTimeout) || options.photoTimeout < 1000) {
+  throw new Error(`invalid photo timeout: ${options.photoTimeout}`);
+}
+if (options.photoColor) {
+  const values = options.photoColor
+    .split(',')
+    .map((part) => Number(part.trim()));
+  if (
+    values.length !== 3 ||
+    values.some((value) => !Number.isInteger(value) || value < 0 || value > 255)
+  ) {
+    throw new Error(`invalid photo color: ${options.photoColor}`);
+  }
+  options.photoColor = values;
 }
 const session = readFileSync(options.sessionFile, 'utf8').trim();
 if (!session) throw new Error('session file is empty');
@@ -185,17 +257,59 @@ const client = new TelegramClient(
             ip: options.host,
             port: Number(options.port),
             MTProxy: true,
-            secret: isFakeTls ? options.secret.toLowerCase() : `dd${options.secret}`,
+            secret: isFakeTls
+              ? options.secret.toLowerCase()
+              : `dd${options.secret}`,
           },
         }),
-  },
+  }
 );
 
 const png = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
-  'base64',
+  'base64'
 );
 const sha256 = (buffer) => createHash('sha256').update(buffer).digest('hex');
+
+const withTimeout = async (promise, label) => {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(`${label} timed out after ${options.photoTimeout}ms`)
+            ),
+          options.photoTimeout
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const decodeDownloadedImage = (buffer) => {
+  if (isPng(buffer)) return decodePng(buffer);
+  const directory = mkdtempSync(join(tmpdir(), 'mtproxy-photo-'));
+  try {
+    const input = join(directory, 'downloaded.jpg');
+    const output = join(directory, 'downloaded.png');
+    writeFileSync(input, buffer);
+    try {
+      execFileSync('sips', ['-s', 'format', 'png', input, '--out', output], {
+        stdio: 'ignore',
+      });
+    } catch {
+      throw new Error('downloaded photo is JPEG and sips could not decode it');
+    }
+    return decodePng(readFileSync(output));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+};
 
 let status = 'FAIL';
 const sentIds = [];
@@ -205,8 +319,55 @@ try {
   const user = me.username ? `@${me.username}` : String(me.id);
   console.log(`API_TEST_CONNECTED=yes user=${user}`);
 
-  if (options.receiveProfile) {
-    const downloadedPhoto = await client.downloadProfilePhoto(options.receiveProfile, {});
+  if (options.roundtripPhoto) {
+    const color = options.photoColor || [...randomBytes(3)];
+    const png = createSolidPng(options.photoSize, color);
+    png.name = 'mtproxy-roundtrip.png';
+    const sent = await withTimeout(
+      client.sendFile('me', {
+        file: png,
+        caption: marker,
+      }),
+      'photo upload'
+    );
+    if (sent?.id) sentIds.push(sent.id);
+    console.log(
+      `API_TEST_PHOTO_SENT=yes size=${options.photoSize} color=${color.join(',')} bytes=${png.length} sha256=${sha256(png)}`
+    );
+    const messages = await client.getMessages('me', { limit: 5 });
+    const received = messages.find(
+      (message) => message.id === sent?.id || message.message === marker
+    );
+    if (!received?.media)
+      throw new Error('sent photo was not found in Saved Messages');
+    const downloaded = await client.downloadMedia(received, {});
+    if (!Buffer.isBuffer(downloaded))
+      throw new Error('photo download did not return a buffer');
+    const decoded = decodeDownloadedImage(downloaded);
+    const delta = Math.max(
+      ...decoded.color.map((value, index) => Math.abs(value - color[index]))
+    );
+    const exact = downloaded.equals(png);
+    console.log(
+      `API_TEST_PHOTO_ROUNDTRIP=yes size=${decoded.width}x${decoded.height} color=${decoded.color.join(',')} delta=${delta} exact=${exact ? 'yes' : 'no'} bytes=${downloaded.length} sha256=${sha256(downloaded)}`
+    );
+    if (
+      decoded.width !== options.photoSize ||
+      decoded.height !== options.photoSize
+    ) {
+      throw new Error(`photo size changed: ${decoded.width}x${decoded.height}`);
+    }
+    if (delta > options.photoTolerance) {
+      throw new Error(
+        `photo color delta ${delta} exceeds tolerance ${options.photoTolerance}`
+      );
+    }
+    console.log('API_TEST_PHOTO_VERIFIED=yes');
+  } else if (options.receiveProfile) {
+    const downloadedPhoto = await client.downloadProfilePhoto(
+      options.receiveProfile,
+      {}
+    );
     const isJpeg =
       Buffer.isBuffer(downloadedPhoto) &&
       downloadedPhoto.length > 3 &&
@@ -216,17 +377,24 @@ try {
     const isPng =
       Buffer.isBuffer(downloadedPhoto) &&
       downloadedPhoto.length > 8 &&
-      downloadedPhoto.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+      downloadedPhoto
+        .subarray(0, 8)
+        .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
     console.log(
-      `API_TEST_RECEIVE_PROFILE_DOWNLOADED=yes peer=${options.receiveProfile} bytes=${downloadedPhoto?.length || 0} verified=${isJpeg || isPng ? 'yes' : 'no'}`,
+      `API_TEST_RECEIVE_PROFILE_DOWNLOADED=yes peer=${options.receiveProfile} bytes=${downloadedPhoto?.length || 0} verified=${isJpeg || isPng ? 'yes' : 'no'}`
     );
-    if (!(isJpeg || isPng)) throw new Error('profile photo download did not return a JPEG or PNG');
+    if (!(isJpeg || isPng))
+      throw new Error('profile photo download did not return a JPEG or PNG');
   } else if (options.receiveMedia) {
-    const candidates = await client.getMessages(options.chat, { limit: options.receiveLimit });
-    const receivedPhoto = candidates.find((message) => message && message.photo);
+    const candidates = await client.getMessages(options.chat, {
+      limit: options.receiveLimit,
+    });
+    const receivedPhoto = candidates.find(
+      (message) => message && message.photo
+    );
     if (!receivedPhoto) throw new Error(`no photo found in ${options.chat}`);
     console.log(
-      `API_TEST_RECEIVE_MEDIA_FOUND=yes chat=${options.chat} message_id=${receivedPhoto.id}`,
+      `API_TEST_RECEIVE_MEDIA_FOUND=yes chat=${options.chat} message_id=${receivedPhoto.id}`
     );
     const downloadedPhoto = await client.downloadMedia(receivedPhoto, {});
     const isJpeg =
@@ -238,66 +406,89 @@ try {
     const isPng =
       Buffer.isBuffer(downloadedPhoto) &&
       downloadedPhoto.length > 8 &&
-      downloadedPhoto.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+      downloadedPhoto
+        .subarray(0, 8)
+        .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
     const photoVerified = isJpeg || isPng;
     console.log(
-      `API_TEST_RECEIVE_MEDIA_DOWNLOADED=yes chat=${options.chat} bytes=${downloadedPhoto?.length || 0} verified=${photoVerified ? 'yes' : 'no'}`,
+      `API_TEST_RECEIVE_MEDIA_DOWNLOADED=yes chat=${options.chat} bytes=${downloadedPhoto?.length || 0} verified=${photoVerified ? 'yes' : 'no'}`
     );
-    if (!photoVerified) throw new Error('received media download did not return a JPEG or PNG');
+    if (!photoVerified)
+      throw new Error('received media download did not return a JPEG or PNG');
   } else {
     const sent = await client.sendMessage('me', { message: marker });
     if (sent?.id) sentIds.push(sent.id);
     const messages = await client.getMessages('me', { limit: 5 });
     const verified = messages.some((message) => message.message === marker);
-    console.log(`API_TEST_SENT=yes saved_messages_verified=${verified ? 'yes' : 'no'} marker=${marker}`);
-    if (!verified) throw new Error('sent message was not found in Saved Messages');
-
-  if (options.media) {
-    const caption = `${marker} media`;
-    const mediaMessage = await client.sendFile('me', {
-      file: png,
-      caption,
-      forceDocument: true,
-      attributes: [new Api.DocumentAttributeFilename({ fileName: 'api-media-test.png' })],
-    });
-    if (mediaMessage?.id) sentIds.push(mediaMessage.id);
-    console.log(`API_TEST_MEDIA_SENT=yes bytes=${png.length}`);
-    const mediaMessages = await client.getMessages('me', { limit: 5 });
-    const received = mediaMessages.find(
-      (message) => message.id === mediaMessage.id || message.message === caption,
-    );
-    if (!received?.media) throw new Error('sent media was not found in Saved Messages');
-    const downloaded = await client.downloadMedia(received, {});
-    if (!Buffer.isBuffer(downloaded)) throw new Error('media download did not return a buffer');
-    const uploadedSha = sha256(png);
-    const downloadedSha = sha256(downloaded);
-    const mediaVerified = uploadedSha === downloadedSha && downloaded.length === png.length;
     console.log(
-      `API_TEST_MEDIA_DOWNLOADED=yes bytes=${downloaded.length} verified=${mediaVerified ? 'yes' : 'no'}`,
+      `API_TEST_SENT=yes saved_messages_verified=${verified ? 'yes' : 'no'} marker=${marker}`
     );
-    if (!mediaVerified) throw new Error('downloaded media does not match the uploaded document');
+    if (!verified)
+      throw new Error('sent message was not found in Saved Messages');
 
-    const photo = Buffer.from(png);
-    photo.name = 'api-media-test.png';
-    const photoCaption = `${marker} photo`;
-    const photoMessage = await client.sendFile('me', { file: photo, caption: photoCaption });
-    if (photoMessage?.id) sentIds.push(photoMessage.id);
-    console.log('API_TEST_PHOTO_SENT=yes');
-    const photoMessages = await client.getMessages('me', { limit: 5 });
-    const receivedPhoto = photoMessages.find(
-      (message) => message.id === photoMessage.id || message.message === photoCaption,
-    );
-    if (!receivedPhoto?.media) throw new Error('sent photo was not found in Saved Messages');
-    const downloadedPhoto = await client.downloadMedia(receivedPhoto, {});
-    const photoVerified =
-      Buffer.isBuffer(downloadedPhoto) &&
-      downloadedPhoto.length > 3 &&
-      downloadedPhoto[0] === 0xff &&
-      downloadedPhoto[1] === 0xd8 &&
-      downloadedPhoto[2] === 0xff;
-    if (!photoVerified) throw new Error('photo download did not return a JPEG');
-    console.log(`API_TEST_PHOTO_DOWNLOADED=yes bytes=${downloadedPhoto.length} verified=yes`);
-  }
+    if (options.media) {
+      const caption = `${marker} media`;
+      const mediaMessage = await client.sendFile('me', {
+        file: png,
+        caption,
+        forceDocument: true,
+        attributes: [
+          new Api.DocumentAttributeFilename({ fileName: 'api-media-test.png' }),
+        ],
+      });
+      if (mediaMessage?.id) sentIds.push(mediaMessage.id);
+      console.log(`API_TEST_MEDIA_SENT=yes bytes=${png.length}`);
+      const mediaMessages = await client.getMessages('me', { limit: 5 });
+      const received = mediaMessages.find(
+        (message) =>
+          message.id === mediaMessage.id || message.message === caption
+      );
+      if (!received?.media)
+        throw new Error('sent media was not found in Saved Messages');
+      const downloaded = await client.downloadMedia(received, {});
+      if (!Buffer.isBuffer(downloaded))
+        throw new Error('media download did not return a buffer');
+      const uploadedSha = sha256(png);
+      const downloadedSha = sha256(downloaded);
+      const mediaVerified =
+        uploadedSha === downloadedSha && downloaded.length === png.length;
+      console.log(
+        `API_TEST_MEDIA_DOWNLOADED=yes bytes=${downloaded.length} verified=${mediaVerified ? 'yes' : 'no'}`
+      );
+      if (!mediaVerified)
+        throw new Error(
+          'downloaded media does not match the uploaded document'
+        );
+
+      const photo = Buffer.from(png);
+      photo.name = 'api-media-test.png';
+      const photoCaption = `${marker} photo`;
+      const photoMessage = await client.sendFile('me', {
+        file: photo,
+        caption: photoCaption,
+      });
+      if (photoMessage?.id) sentIds.push(photoMessage.id);
+      console.log('API_TEST_PHOTO_SENT=yes');
+      const photoMessages = await client.getMessages('me', { limit: 5 });
+      const receivedPhoto = photoMessages.find(
+        (message) =>
+          message.id === photoMessage.id || message.message === photoCaption
+      );
+      if (!receivedPhoto?.media)
+        throw new Error('sent photo was not found in Saved Messages');
+      const downloadedPhoto = await client.downloadMedia(receivedPhoto, {});
+      const photoVerified =
+        Buffer.isBuffer(downloadedPhoto) &&
+        downloadedPhoto.length > 3 &&
+        downloadedPhoto[0] === 0xff &&
+        downloadedPhoto[1] === 0xd8 &&
+        downloadedPhoto[2] === 0xff;
+      if (!photoVerified)
+        throw new Error('photo download did not return a JPEG');
+      console.log(
+        `API_TEST_PHOTO_DOWNLOADED=yes bytes=${downloadedPhoto.length} verified=yes`
+      );
+    }
   }
 
   if (options.keep) {
@@ -312,8 +503,14 @@ try {
   process.exitCode = 1;
 } finally {
   if (!options.keep && sentIds.length) {
-    await client.deleteMessages('me', sentIds, { revoke: true }).catch(() => {});
+    await client
+      .deleteMessages('me', sentIds, { revoke: true })
+      .catch(() => {});
   }
-  await client.disconnect().catch(() => {});
+  await Promise.race([
+    client.disconnect().catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, 5000)),
+  ]);
   console.log(`API_TEST_STATUS=${status}`);
+  setTimeout(() => process.exit(process.exitCode ?? 0), 250);
 }

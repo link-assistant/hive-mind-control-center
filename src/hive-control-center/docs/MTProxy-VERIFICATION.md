@@ -117,14 +117,19 @@ TELEGRAM_ENV_FILE=/path/to/telegram.env node diagnose-mtproxy.mjs --api-media --
 TELEGRAM_APP_CONFIG=/path/to/accounts-shared-data TELEGRAM_ENV_FILE=/path/to/telegram.env node scripts/mtproxy/api-test.mjs --media
 TELEGRAM_APP_CONFIG=/path/to/accounts-shared-data TELEGRAM_ENV_FILE=/path/to/telegram.env node scripts/mtproxy/api-test.mjs --receive-media --chat me --receive-limit 1
 TELEGRAM_APP_CONFIG=/path/to/accounts-shared-data TELEGRAM_ENV_FILE=/path/to/telegram.env node scripts/mtproxy/api-test.mjs --receive-profile @telegram
+TELEGRAM_APP_CONFIG=/path/to/accounts-shared-data TELEGRAM_ENV_FILE=/path/to/telegram.env node scripts/mtproxy/api-test.mjs --roundtrip-photo --photo-size 128
 node scripts/mtproxy/api-test.mjs --no-proxy --env-file /path/to/telegram.env
 node diagnose-mtproxy.mjs --capture --capture-seconds 20 --api-media --no-report
 TELEGRAM_ENV_FILE=/path/to/telegram.env node diagnose-mtproxy.mjs --capture --capture-seconds 30 --api-media --no-report
 ```
 
-`--receive-media` and `--receive-profile` are receive-only checks. Use
-`--relax-ping` only to distinguish an API-client timeout from a dead transfer;
-it does not change the proxy. Private values come from `.lenv`,
+`--receive-media` and `--receive-profile` are receive-only checks.
+`--roundtrip-photo` generates a random solid-color PNG, sends it to Saved
+Messages as a photo, downloads it, and verifies the dimensions and center color;
+it prints `exact=yes` when Telegram preserved the PNG bytes, otherwise the
+`delta` must stay within `--photo-tolerance`. JPEG downloads are decoded with
+macOS `sips`. Use `--relax-ping` only to distinguish an API-client timeout from
+a dead transfer; it does not change the proxy. Private values come from `.lenv`,
 `TELEGRAM_ENV_FILE`, or CLI paths. Never
 commit `.lenv`, `.env`, `.telegram_session`, proxy secrets, API hashes, or SSH
 passwords.
