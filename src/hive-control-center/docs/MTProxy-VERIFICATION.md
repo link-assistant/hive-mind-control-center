@@ -5,19 +5,19 @@ Verified on 2026-11-08 against `161.97.177.66:443` with the classic
 
 ## Results
 
-| Check | Result |
-| --- | --- |
-| Known-good profile | PASS, 15 checks, 0 mismatches |
-| Telegram app proxy | match, `dd` prefix, app secret matches `/data/secret` |
-| Text through MTProto API | PASS, `user=@drakonard`, marker read back and deleted |
-| Document through MTProto API | PASS, 68 bytes uploaded, downloaded, SHA-256 matched, deleted |
-| Photo through MTProto API | NOT VERIFIED, check added; latest run timed out before transfer |
-| Bidirectional packet capture | PASS, client 8262 bytes, proxy 11901 bytes, 2 client connections |
-| Path MTU | PASS, 1500-byte MTU / 1472-byte payload |
-| TCPMSS | 1200 on ports 443 and 8443, both directions, service enabled/active |
-| New app transport errors | none during the run |
-| Idle client connections | 994 established; 842 inbound clients, 144 outbound DC sockets |
-| Container file limit | explicit `nofile=524288:524288`; engine needs 65552 |
+| Check                        | Result                                                              |
+| ---------------------------- | ------------------------------------------------------------------- |
+| Known-good profile           | PASS, 15 checks, 0 mismatches                                       |
+| Telegram app proxy           | match, `dd` prefix, app secret matches `/data/secret`               |
+| Text through MTProto API     | PASS, `user=@drakonard`, marker read back and deleted               |
+| Document through MTProto API | PASS, 68 bytes uploaded, downloaded, SHA-256 matched, deleted       |
+| Photo through MTProto API    | NOT VERIFIED, check added; latest run timed out before transfer     |
+| Bidirectional packet capture | PASS, client 8262 bytes, proxy 11901 bytes, 2 client connections    |
+| Path MTU                     | PASS, 1500-byte MTU / 1472-byte payload                             |
+| TCPMSS                       | 1200 on ports 443 and 8443, both directions, service enabled/active |
+| New app transport errors     | none during the run                                                 |
+| Idle client connections      | 994 established; 842 inbound clients, 144 outbound DC sockets       |
+| Container file limit         | explicit `nofile=524288:524288`; engine needs 65552                 |
 
 Direct Telegram DC connections from the client network are blocked, so the
 diagnostics report them as `FAIL` without failing the run. Traffic through the
@@ -53,6 +53,29 @@ still did not complete: uploads stalled, `@telegram` message history timed out,
 and `downloadProfilePhoto('@telegram'|'me')` timed out. `getMessages('me',
 {limit:1})` did return, but there was no photo to download.
 
+### Network path findings
+
+The media failure is not specific to MTProxy. On the current client network,
+small responses complete but bulk TCP transfers to this server stall after
+roughly 9-11 KB:
+
+| Test                                                  | Result                                  |
+| ----------------------------------------------------- | --------------------------------------- |
+| `ping -D -s 1472` to server                           | 0% loss, so the path MTU is 1500        |
+| Direct `http://SERVER:8000/1mb.bin`                   | `200`, 9,504-11,200 bytes, then timeout |
+| Direct host `http://SERVER:8001/1mb.bin` (not Docker) | `200`, 11,200 bytes, then timeout       |
+| `iperf3 -p 5201`                                      | 0 bytes/sec in both directions          |
+| gost TLS tunnel on 8443 or 80, local SOCKS5           | small HTTP `200`; 1 MB and HTTPS stall  |
+| gost plain SOCKS5 tunnel on 1080                      | same stall                              |
+| cloudflared quick tunnel to host HTTP                 | `200`, 1,369 bytes, then stall          |
+| Direct Cloudflare 1 MB download                       | `200`, 1,000,000 bytes in ~0.5 s        |
+
+MSS clamping to 1200, disabling timestamps/window scaling, and BBR did not
+change the result. The current client network therefore throttles or blackholes
+bulk TCP to this server after the first few packets, while text-sized requests
+pass. MTProxy configuration cannot repair that path; a relay or tunnel whose
+bulk path is not throttled is required.
+
 Current status: messages work, media upload/download does not complete from this
 client network. This is not a passing photo/media verification.
 
@@ -62,19 +85,19 @@ All rows were tested from the same client network; no network switch was used.
 "Connect" means the client reached DC2 or the proxy but did not complete a
 request; "text" means the Saved Messages marker was sent, read back, and deleted.
 
-| # | Proxy / image | Transport and port | Workers, limits | Secret / fronting | Result |
-| --- | --- | --- | --- | --- | --- |
-| 1 | classic `mtproxy/mtproxy:latest` (2019) | HTTP `-H 443`, app port 443 | 1, `nofile=65536` | `dd` key | Startup failed: `cannot raise open file limit to 65552` |
-| 2 | classic 2019 | HTTP `-H 443`, app port 443 | 1, `nofile=524288` | `dd` key | Text PASS; media upload FAIL (ping timeouts) |
-| 3 | classic 2019 | HTTP `-H 443`, app port 443 | 4, `nofile=524288` | `dd` key | Text PASS immediately; media upload, `@telegram` receive, and profile-photo download FAIL |
-| 4 | classic 2019 | `INTERNAL_PORT=443 PORT=8888` | 1, `nofile=524288` | `dd` key | No listener on 443 (only 8888); discarded |
-| 5 | `telegrammessenger/proxy:2.0beta` (2026-04) | HTTP `-H 443`, host 8443 | default | same `dd` key | Connects; media FAIL, same ping timeouts |
-| 6 | mtg 2.3.0 FakeTLS | TLS/443 | default | `ee` secret, `contabo.com` | Connects; text FAIL |
-| 7 | mtg 2.3.0 FakeTLS | TLS/443 | default | `ee` secret, `www.google.com` | Connects; text FAIL |
-| 8 | mtg 2.3.0 FakeTLS | TLS/443 | default | `ee` secret, `vk.com` | Connects; text FAIL |
-| 9 | mtg 2.3.0 `simple-run` | plain MTProto/443 | default | raw `dd<key>` or 32-hex key | Startup rejected: incorrect first secret byte |
-| 10 | direct (no proxy) | Telegram DC 443 | n/a | n/a | Text/media requests time out from this client |
-| 11 | classic 2019 | receive-only API | 4, `nofile=524288` | `dd` key | `getMessages('me',limit:1)` completes (no photo); `@telegram` history and profile photos time out |
+| #   | Proxy / image                               | Transport and port            | Workers, limits    | Secret / fronting             | Result                                                                                            |
+| --- | ------------------------------------------- | ----------------------------- | ------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------- |
+| 1   | classic `mtproxy/mtproxy:latest` (2019)     | HTTP `-H 443`, app port 443   | 1, `nofile=65536`  | `dd` key                      | Startup failed: `cannot raise open file limit to 65552`                                           |
+| 2   | classic 2019                                | HTTP `-H 443`, app port 443   | 1, `nofile=524288` | `dd` key                      | Text PASS; media upload FAIL (ping timeouts)                                                      |
+| 3   | classic 2019                                | HTTP `-H 443`, app port 443   | 4, `nofile=524288` | `dd` key                      | Text PASS immediately; media upload, `@telegram` receive, and profile-photo download FAIL         |
+| 4   | classic 2019                                | `INTERNAL_PORT=443 PORT=8888` | 1, `nofile=524288` | `dd` key                      | No listener on 443 (only 8888); discarded                                                         |
+| 5   | `telegrammessenger/proxy:2.0beta` (2026-04) | HTTP `-H 443`, host 8443      | default            | same `dd` key                 | Connects; media FAIL, same ping timeouts                                                          |
+| 6   | mtg 2.3.0 FakeTLS                           | TLS/443                       | default            | `ee` secret, `contabo.com`    | Connects; text FAIL                                                                               |
+| 7   | mtg 2.3.0 FakeTLS                           | TLS/443                       | default            | `ee` secret, `www.google.com` | Connects; text FAIL                                                                               |
+| 8   | mtg 2.3.0 FakeTLS                           | TLS/443                       | default            | `ee` secret, `vk.com`         | Connects; text FAIL                                                                               |
+| 9   | mtg 2.3.0 `simple-run`                      | plain MTProto/443             | default            | raw `dd<key>` or 32-hex key   | Startup rejected: incorrect first secret byte                                                     |
+| 10  | direct (no proxy)                           | Telegram DC 443               | n/a                | n/a                           | Text/media requests time out from this client                                                     |
+| 11  | classic 2019                                | receive-only API              | 4, `nofile=524288` | `dd` key                      | `getMessages('me',limit:1)` completes (no photo); `@telegram` history and profile photos time out |
 
 Interpretation: the failure follows the **media/file path**, not one engine.
 Text-sized requests complete; requests that require a larger or longer-lived
