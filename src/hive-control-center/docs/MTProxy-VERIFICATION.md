@@ -76,6 +76,44 @@ bulk TCP to this server after the first few packets, while text-sized requests
 pass. MTProxy configuration cannot repair that path; a relay or tunnel whose
 bulk path is not throttled is required.
 
+### Packet-capture evidence (2026-11-08)
+
+A server-side `tcpdump -i any -nn -s0 -w /tmp/mtpcap.pcap 'tcp port 443'`
+capture ran for 80 seconds while the client ran a text check followed by
+`--roundtrip-photo`. The capture was filtered to `eth0` so Docker's
+`veth`/`docker0` duplicate frames were not counted. The client source address
+is omitted here.
+
+| Direction                           | Packets |  Bytes |
+| ----------------------------------- | ------: | -----: |
+| server `eth0` out (proxy -> client) |     129 | 48,218 |
+| server `eth0` in (client -> proxy)  |     109 |  8,671 |
+
+TCP flags included 29 SYNs. Eleven distinct server sequence ranges were sent
+more than once, producing 40 extra retransmitted segments. Examples:
+
+| Client port | Server sequence end | Highest client ACK | Repeated server segment                    |
+| ----------- | ------------------: | -----------------: | ------------------------------------------ |
+| 40298       |               3,207 |                771 | `seq 771:1530`, 759 bytes, sent 3 times    |
+| 45620       |               5,816 |              4,451 | `seq 4451:5559`, 1,108 bytes, sent 7 times |
+| 42525       |               5,275 |              3,637 | `seq 3637:3751`, 114 bytes, sent 8 times   |
+| 33334       |               3,172 |              3,063 | `seq 3063:3172`, 109 bytes, sent 9 times   |
+
+The client log for the same interval contained repeated
+`Connection to dc 2 closed (lost: Error: Ping timeout of 5.0s expired)` and the
+photo check ended with `API_TEST_ERROR=photo upload timed out after 30000ms`.
+The text check also failed during this particular capture; it had passed in
+earlier runs. Server and client observations therefore do **not** match: the
+server keeps sending and retransmitting while the client ACKs only part of the
+stream, then gives up. This locates the loss on the server-to-client network
+leg, not inside MTProxy.
+
+The upload path is also affected, but the capture shows the client only sent
+8.7 KB while the server sent 48.2 KB. The immediate failure is that the client
+cannot receive/ACK the server's response and data; a client-side capture was not
+possible because local `tcpdump` needs sudo. The pcap was analyzed on the server
+and deleted; it is not stored in this repository.
+
 Current status: messages work, media upload/download does not complete from this
 client network. This is not a passing photo/media verification.
 
@@ -141,6 +179,34 @@ ping and TCP 443 still worked, matching the documented source-IP blackhole.
 Server diagnostics were therefore run through a temporary outbound-only remote
 execution path; no client network was switched. The proxy itself stayed
 reachable and served the API checks.
+
+## Repository audit (2026-11-08)
+
+The GitHub source of truth is the nested clone at
+`/Users/konard/Code/Archive/link-assistant/hive-control-center/repository`,
+remote `https://github.com/link-assistant/hive-mind-control-center.git`, branch
+`main`. At audit time it was clean and tracking `origin/main`; the last
+verification commit was `31d7f3b`.
+
+All active source and logic under
+`repository/src/hive-control-center` is tracked and pushed, including
+`deploy-docker.mjs`, `diagnose-mtproxy.mjs`, `scripts/mtproxy/api-test.mjs`,
+`scripts/mtproxy/solid-photo.mjs`, the diagnostics modules, docs, and tests.
+
+The parent workspace is an older duplicate checkout with its own local git
+repository. Its active source files have the same content as the nested source
+of truth, except `deploy-docker.mjs`, `docs/DEPLOY.md`,
+`docs/workspace-permissions-research.md`, and
+`scripts/mtproxy/known-good.json`, which are older in the parent. The parent
+copies of `diagnose-mtproxy.sh` and `update-docker.sh` are retired; their `.mjs`
+replacements are in the nested repository. Parent `auto-fix` source files match
+the nested repository; its only content difference is an extra trailing newline
+in `auto-fix/issue-footer.md`. The parent repository has no remote and is not
+the GitHub source of truth.
+
+Private or generated data is deliberately excluded: `.lenv`, `.env`,
+`.telegram_session`, `data/`, `case-data/`, logs, pcap files, reports,
+`node_modules/`, and `__pycache__/`.
 
 ## Repository commits
 
