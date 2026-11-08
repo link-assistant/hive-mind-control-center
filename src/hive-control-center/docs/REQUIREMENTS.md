@@ -38,6 +38,11 @@ Update it whenever a requirement is added, changed, or completed.
 - [x] Record app proxy/secret match, listening port, MSS rules, DC connections, app-log deltas, and media progress.
 - [x] Provide packet-capture based verification with a clear idle/probe verdict.
 - [x] Avoid treating an idle client with no payload as a hard failure when capture proves flow.
+- [x] Log client and server observations with UTC timestamps, a shared run ID, side labels, and a machine-readable summary JSON.
+- [x] Capture both sides in the same window when passwordless sudo is available; otherwise print the exact manual client `tcpdump` command.
+- [x] Analyze retransmits, duplicate ACKs, RSTs, and server-sequence/client-ACK gaps and compare client-transmitted with server-received bytes.
+- [x] Provide `compare-summary.mjs` and `--compare` for old-versus-new run comparison.
+- [x] Audit every deployment, client/API, diagnostic, and path option in `docs/MTProxy-CONFIG-COVERAGE.md`.
 - [x] Move the remaining shell diagnostics to `.mjs` and keep the shell-free path as the default.
 - [ ] Add CI-safe syntax and behavior tests for the imported mjs diagnostics.
 - [x] Add a `--help` contract and argument validation for the mjs diagnostics entry point.
@@ -80,3 +85,5 @@ Update it whenever a requirement is added, changed, or completed.
 - 2026-11-08: added an automated `--roundtrip-photo` check that generates a random solid-color PNG, sends it to Saved Messages, downloads it, and verifies dimensions and center color (exact bytes when preserved, otherwise a configurable delta). Local PNG encode/decode tests pass; the live run still fails with `photo upload timed out after 30000ms`.
 - 2026-11-08: an 80-second server pcap during text/photo tests recorded 48,218 bytes sent by the proxy to the client but only 8,671 bytes received from the client; 11 server sequence ranges were retransmitted, 40 extra segments. Client ACKs lagged server sequence ends (e.g. 771 vs 3207; 4451 vs 5816), and the client logged 5-second ping timeouts. Server and client observations do not match: data is lost on the server-to-client network leg, not inside MTProxy.
 - 2026-11-08: repository audit confirmed active source is tracked and pushed in the nested `repository` clone; parent workspace copies are older duplicates, and retired `.sh` files are not part of the source of truth. Private `.lenv`, data, logs, pcap, and sessions remain untracked.
+- 2026-11-08: added correlated two-sided logging. Each diagnostic run now writes a timestamped log plus summary JSON, records client and server TCP counters and configuration, analyzes pcap retransmits/ACK gaps/RSTs, supports optional client capture, and can diff two summaries. The full option inventory is in `docs/MTProxy-CONFIG-COVERAGE.md`.
+- 2026-11-08: live failure-path run produced log and summary JSON; SSH auth stalled after key exchange, server capture did not start, and client capture was marked skipped rather than falsely reported as absent. Added `--ssh-timeout` and `--api-timeout` so unreachable-server runs terminate with a summary.

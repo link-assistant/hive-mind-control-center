@@ -2,7 +2,8 @@
 
 Verified on 2026-11-08 against `161.97.177.66:443` with the classic
 `mtproxy-classic-443` container. See `MTProxy-RESEARCH-BACKLOG.md` for untried
-experiments and quality improvements.
+experiments, `MTProxy-CONFIG-COVERAGE.md` for every supported option and its
+status, and "Correlated client/server logging" below for two-sided captures.
 
 ## Results
 
@@ -122,6 +123,15 @@ not stored in this repository.
 Current status: messages work, media upload/download does not complete from this
 client network. This is not a passing photo/media verification.
 
+Latest two-sided attempt (`2026-11-08T17:47Z`): the client could open TCP 443,
+but SSH authentication to the server stalled after key exchange. Remote
+diagnostics and server `tcpdump` were therefore unavailable; client capture was
+marked skipped rather than absent. The run wrote
+`data/diagnostics/mtproxy-2026-11-08-17-47-37-815.json` with
+`result.status=BLOCKED`, `server.available=false`, and explicit
+`serverCapture`/`clientCapture` errors. Re-run once SSH authentication from this
+source IP succeeds.
+
 ## Configuration matrix (tested 2026-11-08)
 
 All rows were tested from the same client network; no network switch was used.
@@ -149,6 +159,39 @@ real Telegram-client download through a TLS-encrypted TCP tunnel, because the
 API client's own 5-second ping guard also closes slow media sessions. That test
 is not yet run.
 
+## Correlated client/server logging
+
+`diagnose-mtproxy.mjs` writes one timestamped log and one machine-readable JSON
+summary per run. Server and client lines are labelled, and the JSON contains
+both sides plus the packet counters needed for direct comparison.
+
+```bash
+node diagnose-mtproxy.mjs --capture --capture-seconds 30 --client-capture \
+  --api-test --api-relax-ping
+node scripts/mtproxy/compare-summary.mjs previous.json \
+  data/diagnostics/mtproxy-<stamp>.json
+```
+
+What is recorded:
+
+- Client: proxy endpoint and secret hash, route/interface, app transport errors,
+  established sockets, Send-Q/Recv-Q, media partial-file growth, API status and
+  error, and optional client pcap counters.
+- Server: container/image, workers, file limits, TCP congestion control,
+  `proxy.conf` hash and content, listening port, MSS rules/service, client and
+  DC connection counts, Send-Q, bytes, DC2 payload connections, host and
+  container `nstat` counters, recent logs with timestamps, and server pcap.
+- Packet capture: wire bytes, retransmitted segments/bytes, duplicate ACKs,
+  RSTs, ACK-gap maximum/sum/flow count, and the derived comparison
+  `client_tx - server_rx` and `server_tx - client_rx`.
+- Each run prints `API_TEST_*`, `CAPTURE_*`, `CLIENT_CAPTURE_*`,
+  `COMPARE_*`, and `SUMMARY_COMPARE_*` lines for grep/CI use.
+
+Client capture requires passwordless sudo; if it is unavailable the report
+prints the exact manual `tcpdump` command instead of failing silently. Captures
+are deleted by default and are ignored by `.gitignore`. Never commit `.lenv`,
+sessions, secrets, pcaps, or raw client logs.
+
 ## Repeatable commands
 
 Run from `src/hive-control-center/`:
@@ -164,6 +207,8 @@ TELEGRAM_APP_CONFIG=/path/to/accounts-shared-data TELEGRAM_ENV_FILE=/path/to/tel
 node scripts/mtproxy/api-test.mjs --no-proxy --env-file /path/to/telegram.env
 node diagnose-mtproxy.mjs --capture --capture-seconds 20 --api-media --no-report
 TELEGRAM_ENV_FILE=/path/to/telegram.env node diagnose-mtproxy.mjs --capture --capture-seconds 30 --api-media --no-report
+TELEGRAM_ENV_FILE=/path/to/telegram.env node diagnose-mtproxy.mjs --capture --client-capture --api-test --api-relax-ping
+node scripts/mtproxy/compare-summary.mjs data/diagnostics/mtproxy-before.json data/diagnostics/mtproxy-after.json
 ```
 
 `--receive-media` and `--receive-profile` are receive-only checks.

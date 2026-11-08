@@ -1,7 +1,8 @@
 # MTProxy research backlog
 
 Status on 2026-11-08. Tested proxy configurations and packet-capture evidence are
-in `MTProxy-VERIFICATION.md`. This file records what is **not** yet tested and
+in `MTProxy-VERIFICATION.md`; the option-by-option audit is in
+`MTProxy-CONFIG-COVERAGE.md`. This file records what is **not** yet tested and
 which experiments are most likely to change the conclusion.
 
 ## Known conclusion
