@@ -1,0 +1,66 @@
+# Server
+SERVER_IP: 0.0.0.0
+SERVER_USER: root
+SERVER_PASS:
+
+# Queue: minimum gap the bot enforces between STARTING successive tasks (per tool),
+# in milliseconds. This is the "interval between tasks". 300000 = 5 minutes.
+# hive-mind env var: HIVE_MIND_MIN_START_INTERVAL_MS (default 600000 = 10 min).
+HIVE_MIND_MIN_START_INTERVAL_MS: 300000
+
+# Safety floor for the interval above. hive-mind resolves the effective gap as
+# Math.max(MIN_START_INTERVAL_MS, FLOOR_MS), and FLOOR_MS defaults to 10 min —
+# so WITHOUT this key the 5 min above is silently clamped back up to 10 min
+# (hive-mind#2053, fixed in 2.5.5 by adding this opt-out). Keep it equal to the
+# interval above; raising the interval past this floor works without touching it.
+HIVE_MIND_MIN_START_INTERVAL_FLOOR_MS: 300000
+
+# Queue admission gate: block/enqueue new tasks when disk usage reaches this RATIO
+# (float 0.0-1.0, NOT a percent — 0.65 = 65%). hive-mind default is 0.8; lower it
+# to leave more headroom before the host disk fills up. Uncomment to override.
+# HIVE_MIND_DISK_THRESHOLD: 0.65
+
+# Telegram Bot
+HIVE_TELEGRAM_BOT_CONFIGURATION: "
+TELEGRAM_BOT_TOKEN: YOUR_TELEGRAM_BOT_TOKEN
+TELEGRAM_ALLOWED_CHATS:
+  -1002975819706
+  -1002861722681
+TELEGRAM_HIVE_OVERRIDES:
+  --all-issues
+  --once
+  --skip-issues-with-prs
+  --attach-logs
+  --verbose
+  --no-tool-check
+  --disable-report-issue
+  (--isolation docker)
+TELEGRAM_SOLVE_OVERRIDES:
+  --attach-logs
+  --verbose
+  --no-tool-check
+  --disable-report-issue
+  (--isolation docker)
+TELEGRAM_BOT_VERBOSE: true
+"
+
+# Telegram MTProto proxy (optional). The default engine is the official classic
+# mtproto-proxy image, the only one verified end-to-end for messages, photos,
+# video and large documents. mtg is available for experiments only.
+# Enable with --mtproxy on the command line or DEPLOY_MTPROXY: true here.
+DEPLOY_MTPROXY: false
+MTPROXY_ENGINE: classic
+MTPROXY_PORT: 443
+# TCP MSS clamp applied to the proxy port(s) in both directions. 1360 was too
+# high on the mobile path; 1200 is the known-good value. Persisted via
+# mtproxy-mss.service and re-applied on reboot.
+MTPROXY_MSS: 1200
+# Classic engine image (official mtproto-proxy; reads the persisted secret).
+MTPROXY_CLASSIC_IMAGE: mtproxy/mtproxy:latest
+# mtg-only settings (ignored by the classic engine):
+# MTPROXY_FRONTING_HOST: contabo.com
+# MTPROXY_IMAGE: nineseconds/mtg:2.3.0
+# Pin the secret (32-char hex key; an mtg ee... secret is also accepted and its
+# key is reused). Leave unset to reuse the persisted key, or generate one.
+# The tg:// link is written root-only to the engine's config dir /link.txt.
+# MTPROXY_SECRET: 00baadf00d15abad1deaa515baadcafe

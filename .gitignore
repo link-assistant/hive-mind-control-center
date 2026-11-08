@@ -141,3 +141,25 @@ vite.config.ts.timestamp-*
 
 # jscpd reports
 reports/
+
+# Local credentials and operational data for src/hive-control-center
+.lenv
+**/.lenv
+!.lenv.example
+!**/.lenv.example
+.env
+.env.*
+!.env.example
+!**/.env.example
+data/
+case-data/
+**/data/diagnostics/
+*.pcap
+*.pcapng
+*.tgz
+*.tar.gz
+repository/
+
+# Python cache artifacts
+__pycache__/
+*.pyc

@@ -136,6 +136,8 @@ export default [
       // Case study raw data files (downloaded from external sources)
       'docs/case-studies/*/data/**',
       'dev/log/**',
+      // Imported operational tooling is kept as-is; it predates this template.
+      'src/hive-control-center/**',
     ],
   },
 ];

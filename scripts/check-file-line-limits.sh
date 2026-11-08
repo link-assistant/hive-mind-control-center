@@ -69,6 +69,7 @@ check_file() {
 is_exempt() {
   case "$1" in
     docs/case-studies/*/data/*) return 0 ;;
+    src/hive-control-center/*) return 0 ;;
     *) return 1 ;;
   esac
 }

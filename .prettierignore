@@ -9,3 +9,6 @@ CLAUDE.md
 # Case study raw data files (downloaded from external sources)
 docs/case-studies/*/data/
 dev/log/
+
+# Imported operational tooling is kept byte-for-byte as deployed
+src/hive-control-center/

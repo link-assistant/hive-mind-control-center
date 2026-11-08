@@ -13,6 +13,7 @@
     "**/docs/case-studies/**",
     "**/dev/log/**",
     "**/docs/case-studies/**/data/**",
+    "**/src/hive-control-center/**",
     "**/package-lock.json",
     "**/pnpm-lock.yaml",
     "**/yarn.lock"

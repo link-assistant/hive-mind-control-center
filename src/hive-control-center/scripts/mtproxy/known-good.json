@@ -1,0 +1,109 @@
+{
+  "schema": 1,
+  "recordedAt": "2026-11-08T10:05:13Z",
+  "recordedBy": "diagnose-mtproxy.sh / deploy-docker.mjs classic engine",
+  "description": "Known-good classic MTProto proxy profile that carried text messages and media for the macOS Telegram client.",
+  "container": {
+    "name": "mtproxy-classic-443",
+    "image": "mtproxy/mtproxy:latest",
+    "networkMode": "bridge",
+    "restartPolicy": "unless-stopped",
+    "entrypoint": ["/bin/sh", "-c", "/run.sh"],
+    "volume": "/root/.hive-mtproxy-classic-443:/data",
+    "hostPort": 443,
+    "containerPort": 443,
+    "envSecret": false,
+    "secretFile": "/data/secret"
+  },
+  "secret": {
+    "sha256": "8c4aa92627be30583410bd9ab576e758152a68abd57006a501d53b6180a91560",
+    "linkPrefix": "dd",
+    "keyHexLength": 32
+  },
+  "mss": {
+    "value": 1200,
+    "ports": [443, 8443],
+    "service": "mtproxy-mss.service",
+    "enabled": "enabled",
+    "active": "active",
+    "ruleCount": 4
+  },
+  "proxyConf": {
+    "default": 2,
+    "dc2Main": "149.154.161.144:8888",
+    "dc2Media": "149.154.161.184:8888",
+    "media203": "91.105.192.110:443",
+    "lines": [
+      "# force_probability 10 10",
+      "default 2;",
+      "proxy_for 1 149.154.175.50:8888;",
+      "proxy_for -1 149.154.175.50:8888;",
+      "proxy_for 2 149.154.161.144:8888;",
+      "proxy_for -2 149.154.161.184:8888;",
+      "proxy_for 203 91.105.192.110:443;",
+      "proxy_for -203 91.105.192.110:443;",
+      "proxy_for 3 149.154.175.100:8888;",
+      "proxy_for -3 149.154.175.100:8888;",
+      "proxy_for 4 91.108.4.147:8888;",
+      "proxy_for 4 91.108.4.132:8888;",
+      "proxy_for 4 91.108.4.155:8888;",
+      "proxy_for 4 91.108.4.148:8888;",
+      "proxy_for 4 91.108.4.209:8888;",
+      "proxy_for 4 91.108.4.176:8888;",
+      "proxy_for 4 91.108.4.203:8888;",
+      "proxy_for 4 91.108.4.215:8888;",
+      "proxy_for 4 91.108.4.206:8888;",
+      "proxy_for 4 91.108.4.142:8888;",
+      "proxy_for -4 149.154.166.120:8888;",
+      "proxy_for -4 149.154.165.109:8888;",
+      "proxy_for 5 91.108.56.157:8888;",
+      "proxy_for 5 91.108.56.115:8888;",
+      "proxy_for -5 91.108.56.157:8888;",
+      "proxy_for -5 91.108.56.115:8888;"
+    ]
+  },
+  "app": {
+    "host": "161.97.177.66",
+    "port": 443,
+    "secretPrefix": "dd",
+    "secretSha256": "8c4aa92627be30583410bd9ab576e758152a68abd57006a501d53b6180a91560"
+  },
+  "verified": {
+    "messages": true,
+    "media": true,
+    "evidence": [
+      "Bidirectional packet capture after Telegram restart: client->proxy 484257 bytes, proxy->client 783150 bytes over 22 client connections.",
+      "DC2 main text path had 2 payload-carrying upstream connections after restart.",
+      "No new 'no response' or 'invalidating the transport scheme' lines were logged during the verification window.",
+      "Media downloads completed successfully, including a 4.67 MB video, 6.84 MB, 4.9 MB, and 22 MB file; embedded images and avatars rendered.",
+      "TCPMSS clamp observed in capture: client SYN mss=1460 on eth0 rewritten to mss=1200 on docker0/veth."
+    ],
+    "capture": {
+      "clientToProxyBytes": 484257,
+      "proxyToClientBytes": 783150,
+      "clientConnections": 22,
+      "outerMss": 1460,
+      "innerMss": 1200
+    },
+    "appLogErrorsDelta": 0
+  },
+  "snapshot": {
+    "path": "/root/mtproxy-known-good-20261107-0740/",
+    "contents": [
+      "proxy.conf",
+      "proxy.secret",
+      "secret",
+      "mtproxy-mss.sh",
+      "mtproxy-mss.service",
+      "container-inspect.json",
+      "listening.txt",
+      "mangle-mss.txt",
+      "SHA256SUMS"
+    ]
+  },
+  "recovery": [
+    "If Telegram logs dc2 no-response after a network change, run ./diagnose-mtproxy.sh --capture --restart-telegram.",
+    "If SSH auth hangs while TCP/ping works, the client source IP may be blackholed; switch network.",
+    "If the container is missing, run ./deploy-remote-docker.mjs --mtproxy-only --mtproxy-update --verify-mtproxy."
+  ]
+}
