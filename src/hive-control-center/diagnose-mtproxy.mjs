@@ -540,22 +540,6 @@ const analyzeCapture = (path) => {
   capture.clientConns = Number(field('CAPTURE_CLIENT_CONNS')) || 0;
   capture.mss = field('CAPTURE_MSS');
 };
-const refreshDc2Active = () => {
-  if (!remoteState.pid || remoteState.pid === 'unknown' || remoteState.pid === '0') return;
-  const result = remote(`nsenter -t ${sh(remoteState.pid)} -n ss -tinH state established "( dport = :8888 )" 2>/dev/null`);
-  const lines = result.stdout.split(/\r?\n/);
-  let active = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    if (!lines[i].includes('149.154.161.144:8888')) continue;
-    const bytesSent = lines[i + 1]?.match(/bytes_sent:(\d+)/);
-    if (bytesSent && Number(bytesSent[1]) > 92) active += 1;
-  }
-  if (active > 0) {
-    remoteState.dc2MainActive = active;
-    note(`PASS: DC2 main (text path) has ${active} payload-carrying upstream connection(s) after the API test.`);
-  }
-};
-
 let apiResult = { status: 'skipped', output: '' };
 const runApiTest = () => {
   const result = { status: 'skipped', output: '' };
@@ -589,7 +573,6 @@ const runApiTest = () => {
   note(result.output);
   const status = result.output.match(/^API_TEST_STATUS=(.*)$/m);
   result.status = status ? status[1] : 'FAIL';
-  if (result.status === 'PASS') refreshDc2Active();
   return result;
 };
 
@@ -699,6 +682,7 @@ if (options.apiTest && apiResult.status !== 'PASS') hardFail('Telegram API test 
 if (remoteState.client > 0 && remoteState.dc === 0) hardFail('clients connect but the proxy has no Telegram DC connections.');
 if (remoteState.type !== 'mtg' && remoteState.client > 0) {
   if (remoteState.dc2Main === 0) hardFail('no upstream connection to DC2 main (149.154.161.144:8888); text messages cannot flow.');
+  else if (apiResult.status === 'PASS') note('PASS: Telegram API text path passed (DC2 snapshot may predate the API test).');
   else if (remoteState.dc2MainActive === 0) note('WARN: DC2 main upstream exists but has not carried payload yet.');
   else note(`PASS: DC2 main (text path) has ${remoteState.dc2MainActive} payload-carrying upstream connection(s).`);
 }
