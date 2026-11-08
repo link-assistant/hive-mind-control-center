@@ -1,7 +1,8 @@
 # MTProxy verification evidence
 
 Verified on 2026-11-08 against `161.97.177.66:443` with the classic
-`mtproxy-classic-443` container.
+`mtproxy-classic-443` container. See `MTProxy-RESEARCH-BACKLOG.md` for untried
+experiments and quality improvements.
 
 ## Results
 
