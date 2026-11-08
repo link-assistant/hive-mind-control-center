@@ -23,8 +23,8 @@ Update it whenever a requirement is added, changed, or completed.
 - [x] Persist the proxy secret in `/data/secret`; do not rely on a `SECRET` environment variable.
 - [x] Apply TCP MSS 1200 to ports `443` and `8443` in both directions.
 - [x] Record the verified classic proxy configuration and recovery steps in `docs/DEPLOY.md`.
-- [ ] Keep text messages working end to end under normal use.
-- [ ] Keep photos, video, documents, and avatars working end to end.
+- [x] Keep text messages working end to end under normal use; verified through the MTProto API.
+- [ ] Keep photos, video, documents, and avatars working end to end; a document is verified through the API, but photo/video/avatar transfers are not yet tested.
 - [ ] Explain or mitigate the large idle client-connection count and occasional stalled send queues.
 
 ## Diagnostics and verification
@@ -51,8 +51,8 @@ Update it whenever a requirement is added, changed, or completed.
 
 - [x] Document the classic deployment, MSS clamp, known-good snapshot, and recovery paths.
 - [x] Document the source-IP blackhole and stale-transport recovery.
-- [ ] Update the public gist after text and media are re-verified.
-- [ ] Update `link-assistant/router#786` with the final evidence and repeatable commands.
+- [x] Update the public gist after text and media are re-verified: `MTProxy-VERIFICATION.md` was added and `update-docker.sh` was removed.
+- [x] Update `link-assistant/router#786` with the final evidence and repeatable commands: https://github.com/link-assistant/router/issues/786#issuecomment-6720729516
 - [ ] Record any remaining diagnosis in this file before stopping.
 
 ## Verification log
