@@ -855,8 +855,14 @@ const deployMtproxyClassic = async ({ appendOnly = false, forceUpdate = false } 
   // the Telegram link stays stable across updates and reboots.
   if (update || !appendOnly) await run(`docker rm -f ${MTPROXY_CONTAINER}`, { ignoreErrors: true });
 
+  // The 2019 image's /run.sh hardcodes `-C 60000` and asks the kernel for
+  // 65552 open files. Docker's default hard limit is 524288 on this host, but
+  // making it explicit avoids failures on hosts where the default is lower
+  // (`fatal: cannot raise open file limit to 65552`). Do NOT use 65536: the
+  // engine needs 65552, so a hard limit of exactly 65536 makes it crash-loop.
   const runCmd = (
     `docker run -d --name ${MTPROXY_CONTAINER} --restart unless-stopped ` +
+    `--ulimit nofile=524288:524288 ` +
     `-p ${MTPROXY_HOST_PORT}:${MTPROXY_CONTAINER_PORT} -v ${MTPROXY_CLASSIC_CONFIG_DIR}:/data ` +
     `${MTPROXY_CLASSIC_IMAGE}`
   ).replace(/  +/g, ' ');

@@ -93,7 +93,12 @@ sockets; inspect inside the container network namespace if needed.
 
 The secret is persisted root-only in
 `/root/.hive-mtproxy-classic-<port>/secret`; the container mounts that directory
-as `/data`. The generated `tg://` link is written root-only to
+as `/data`.
+
+The classic image's `/run.sh` hardcodes `-C 60000` and asks the kernel for 65552
+open files. The deploy command pins `--ulimit nofile=524288:524288` so the engine
+can raise the limit. Do not lower the hard limit to 65536: the engine needs
+65552 and will crash-loop with `fatal: cannot raise open file limit to 65552`. The generated `tg://` link is written root-only to
 `/root/.hive-mtproxy-classic-<port>/link.txt` and is not printed into the deploy
 log unless `--dangerously-show-secrets` is used:
 

@@ -16,7 +16,8 @@ Verified on 2026-11-08 against `161.97.177.66:443` with the classic
 | Path MTU | PASS, 1500-byte MTU / 1472-byte payload |
 | TCPMSS | 1200 on ports 443 and 8443, both directions, service enabled/active |
 | New app transport errors | none during the run |
-| Idle client connections | about 1105-1131 clients, 12 active, most handshake-only, send queue 0 |
+| Idle client connections | 994 established; 842 inbound clients, 144 outbound DC sockets |
+| Container file limit | explicit `nofile=524288:524288`; engine needs 65552 |
 
 Direct Telegram DC connections from the client network are blocked, so the
 diagnostics report them as `FAIL` without failing the run. Traffic through the
@@ -27,9 +28,24 @@ proxy worked during the runs above.
 After the photo check was added, TCP 443 still accepted connections and the API
 client reached DC2. A retry sent and verified the text marker, then stalled on
 the media upload with repeated `Ping timeout of 5.0s` and `Connection to dc 2
-closed` events. A direct `--no-proxy` run also timed out. Current status:
-messages work, media upload/download does not complete from this client network.
-This is not a passing photo/media verification. Re-run after switching networks.
+closed` events. A direct `--no-proxy` run also timed out.
+
+Server-side inspection showed the container was healthy but held 994 established
+sockets, including 842 inbound clients and 144 outbound Telegram DC sockets. The
+2019 image's `/run.sh` hardcodes `-C 60000` and asks the kernel for 65552 open
+files; recreating the container with `--ulimit nofile=524288:524288` fixed a
+crash-loop seen with a lower hard limit. A restart cleared the connection
+backlog and text passed again, but media still stalled.
+
+A current `telegrammessenger/proxy:2.0beta` image (April 2026 build) was also
+tested on port 8443 with the same secret. It produced the same ping timeouts, so
+the proxy binary/version is not the cause. The common variable is the client
+network path, which also blocks direct DC connections. The next candidate is a
+TLS-camouflaged/FakeTLS transport that survives this network; switching networks
+is explicitly out of scope.
+
+Current status: messages work, media upload/download does not complete from this
+client network. This is not a passing photo/media verification.
 
 ## Repeatable commands
 
@@ -53,8 +69,9 @@ passwords.
 
 During repeated testing the client source IP lost SSH authentication while
 ping and TCP 443 still worked, matching the documented source-IP blackhole.
-Switching networks or waiting restores SSH. The proxy itself stayed reachable
-and served the API checks.
+Server diagnostics were therefore run through a temporary outbound-only remote
+execution path; no client network was switched. The proxy itself stayed
+reachable and served the API checks.
 
 ## Repository commits
 
