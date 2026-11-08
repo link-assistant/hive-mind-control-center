@@ -53,7 +53,7 @@ Update it whenever a requirement is added, changed, or completed.
 - [x] Document the source-IP blackhole and stale-transport recovery.
 - [x] Update the public gist after text and media are re-verified: `MTProxy-VERIFICATION.md` was added and `update-docker.sh` was removed.
 - [x] Update `link-assistant/router#786` with the final evidence and repeatable commands: https://github.com/link-assistant/router/issues/786#issuecomment-6720729516
-- [ ] Record any remaining diagnosis in this file before stopping.
+- [x] Record any remaining diagnosis in this file before stopping.
 
 ## Verification log
 
@@ -61,4 +61,5 @@ Update it whenever a requirement is added, changed, or completed.
 - 2026-11-08: `--api-media` passed (68-byte document uploaded, downloaded, SHA-256 matched, and deleted).
 - 2026-11-08: capture with API traffic passed (`CAPTURE_CLIENT_BYTES=8262`, `CAPTURE_PROXY_BYTES=11901`, `CAPTURE_CLIENT_CONNS=2`).
 - 2026-11-08: known-good comparison passed with 15 checks and 0 mismatches.
-- 2026-11-08: idle connections remain high (about 1122-1131 clients, 12 active, most with no payload); root cause is still open.
+- 2026-11-08: idle connections remain high (about 1105-1131 clients, 12 active, most with no payload); root cause is still open.
+- 2026-11-08: repeated SSH probes from the same client IP began hanging while ping and TCP 22/443 stayed open, matching the documented source-IP blackhole; switching networks restores SSH. This blocked a final live rerun after the last cosmetic mjs change.
