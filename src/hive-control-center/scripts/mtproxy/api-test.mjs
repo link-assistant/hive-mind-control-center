@@ -19,6 +19,8 @@ const options = {
   apiId: process.env.TELEGRAM_API_ID || '',
   apiHash: process.env.TELEGRAM_API_HASH || '',
   lenvFile: process.env.MTPROXY_LENV_FILE || './.lenv',
+  appConfig: process.env.TELEGRAM_APP_CONFIG || '',
+  noProxy: false,
   keep: false,
   media: process.env.MTPROXY_API_MEDIA === '1',
 };
@@ -46,6 +48,8 @@ Options:
   --api-id <id>             Telegram API ID
   --api-hash <hash>         Telegram API hash
   --lenv <path>             .lenv used for SERVER_IP/MTPROXY_PORT (default: ./.lenv)
+  --app-config <path>       Telegram accounts-shared-data file with the proxy secret
+  --no-proxy                Connect directly, bypassing the proxy (diagnosis only)
   --keep                    Keep the marker messages in Saved Messages
   --media                   Also upload and download a small document
   -h, --help                Show this help
@@ -63,6 +67,8 @@ The session file must belong to the same API ID/hash. Never commit .env,
   else if (arg === '--api-id') options.apiId = next();
   else if (arg === '--api-hash') options.apiHash = next();
   else if (arg === '--lenv') options.lenvFile = next();
+  else if (arg === '--app-config') options.appConfig = next();
+  else if (arg === '--no-proxy') options.noProxy = true;
   else if (arg === '--keep') options.keep = true;
   else if (arg === '--media') options.media = true;
   else throw new Error(`unknown option: ${arg}`);
@@ -92,13 +98,22 @@ options.secret = trim(options.secret);
 if (!options.secret && options.secretFile) {
   options.secret = readFileSync(options.secretFile, 'utf8');
 }
-options.secret = options.secret.trim();
-if (!options.host) throw new Error('proxy host is required (--host or SERVER_IP in .lenv)');
-if (!/^[0-9]+$/.test(options.port) || Number(options.port) < 1 || Number(options.port) > 65535) {
-  throw new Error(`invalid proxy port: ${options.port}`);
+if (!options.secret && options.appConfig) {
+  const appConfig = JSON.parse(readFileSync(options.appConfig, 'utf8'));
+  const proxy = appConfig.proxy && typeof appConfig.proxy === 'object' ? appConfig.proxy : appConfig;
+  const encoded = String(proxy.secret ?? '');
+  const hex = Buffer.from(encoded, 'base64').toString('hex');
+  options.secret = ['dd', 'ee'].includes(hex.slice(0, 2).toLowerCase()) ? hex.slice(2) : hex;
 }
-if (!/^[0-9a-f]{32}$/i.test(options.secret)) {
-  throw new Error('proxy secret must be a 32-hex key (set MTPROXY_SECRET_KEY or --secret-file)');
+options.secret = options.secret.trim();
+if (!options.noProxy) {
+  if (!options.host) throw new Error('proxy host is required (--host or SERVER_IP in .lenv)');
+  if (!/^[0-9]+$/.test(options.port) || Number(options.port) < 1 || Number(options.port) > 65535) {
+    throw new Error(`invalid proxy port: ${options.port}`);
+  }
+  if (!/^[0-9a-f]{32}$/i.test(options.secret)) {
+    throw new Error('proxy secret must be a 32-hex key (set MTPROXY_SECRET_KEY or --secret-file)');
+  }
 }
 
 const env = options.envFile ? parseEnv(resolve(options.envFile)) : {};
@@ -115,11 +130,13 @@ const session = readFileSync(options.sessionFile, 'utf8').trim();
 if (!session) throw new Error('session file is empty');
 
 const marker = `mtproxy-api-test ${new Date().toISOString()} ${randomBytes(4).toString('hex')}`;
-const redact = (text) =>
-  String(text ?? '')
-    .replaceAll(options.secret, '<redacted>')
-    .replaceAll(options.apiHash, '<redacted>')
-    .replaceAll(session, '<redacted>');
+const redact = (text) => {
+  let output = String(text ?? '');
+  for (const value of [options.secret, options.apiHash, session]) {
+    if (value) output = output.replaceAll(value, '<redacted>');
+  }
+  return output;
+};
 
 const client = new TelegramClient(
   new sessions.StringSession(session),
@@ -128,12 +145,16 @@ const client = new TelegramClient(
   {
     connectionRetries: 3,
     floodSleepThreshold: 0,
-    proxy: {
-      ip: options.host,
-      port: Number(options.port),
-      MTProxy: true,
-      secret: `dd${options.secret}`,
-    },
+    ...(options.noProxy
+      ? {}
+      : {
+          proxy: {
+            ip: options.host,
+            port: Number(options.port),
+            MTProxy: true,
+            secret: `dd${options.secret}`,
+          },
+        }),
   },
 );
 
@@ -181,6 +202,27 @@ try {
       `API_TEST_MEDIA_DOWNLOADED=yes bytes=${downloaded.length} verified=${mediaVerified ? 'yes' : 'no'}`,
     );
     if (!mediaVerified) throw new Error('downloaded media does not match the uploaded document');
+
+    const photo = Buffer.from(png);
+    photo.name = 'api-media-test.png';
+    const photoCaption = `${marker} photo`;
+    const photoMessage = await client.sendFile('me', { file: photo, caption: photoCaption });
+    if (photoMessage?.id) sentIds.push(photoMessage.id);
+    console.log('API_TEST_PHOTO_SENT=yes');
+    const photoMessages = await client.getMessages('me', { limit: 5 });
+    const receivedPhoto = photoMessages.find(
+      (message) => message.id === photoMessage.id || message.message === photoCaption,
+    );
+    if (!receivedPhoto?.media) throw new Error('sent photo was not found in Saved Messages');
+    const downloadedPhoto = await client.downloadMedia(receivedPhoto, {});
+    const photoVerified =
+      Buffer.isBuffer(downloadedPhoto) &&
+      downloadedPhoto.length > 3 &&
+      downloadedPhoto[0] === 0xff &&
+      downloadedPhoto[1] === 0xd8 &&
+      downloadedPhoto[2] === 0xff;
+    if (!photoVerified) throw new Error('photo download did not return a JPEG');
+    console.log(`API_TEST_PHOTO_DOWNLOADED=yes bytes=${downloadedPhoto.length} verified=yes`);
   }
 
   if (options.keep) {

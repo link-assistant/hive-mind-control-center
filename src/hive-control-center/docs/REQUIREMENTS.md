@@ -5,12 +5,12 @@ Update it whenever a requirement is added, changed, or completed.
 
 ## Repository and source policy
 
-- [x] Upload all operational logic and scripts to `link-assistant/hive-mind-control-center`.
+- [x] Upload all operational logic and scripts, including legacy investigation files, to `link-assistant/hive-mind-control-center`.
 - [x] Keep source under `src/hive-control-center/`.
 - [x] Keep private runtime data out of git: `.lenv`, `.env`, sessions, logs, captures, generated reports, snapshots.
 - [x] Provide `.lenv.example` and document every runtime input.
 - [x] Never print or commit Telegram API hashes, bot tokens, proxy secrets, SSH passwords, or session strings.
-- [x] Use `.mjs` for new logic and checks; do not add Python.
+- [x] Use `.mjs` for new logic and checks; do not add Python. Legacy `.py` copies are archived under `auto-fix/` with `LEGACY-PYTHON.md` and are not used.
 - [x] Convert the remaining project `.sh` scripts to `.mjs`; `update-docker.sh` was retired because `update-docker.mjs` already covers it.
 - [x] Keep experiments in the repository rather than temporary folders.
 - [x] Make behavior configurable at execution time; private values come from environment or CLI paths.
@@ -44,8 +44,10 @@ Update it whenever a requirement is added, changed, or completed.
 - [x] Provide `scripts/mtproxy/api-test.mjs` using a GramJS-compatible session.
 - [x] Send a unique marker to Saved Messages, read it back, and print only status lines.
 - [x] Accept API credentials, session path, proxy host, port, and secret at execution time.
+- [x] Resolve the proxy secret from a Telegram app config and allow `--no-proxy` for direct-path diagnosis.
 - [x] Wire the API test into the main mjs diagnostics command.
-- [x] Verify media through the API as well as text; `--api-media` uploads, downloads, and compares a document.
+- [x] Verify media through the API as well as text; `--api-media` uploads, downloads, and compares a document, then uploads and downloads a photo.
+- [ ] Re-run the photo check and add video/avatar checks after network access is restored.
 
 ## Documentation and follow-up
 
@@ -63,3 +65,4 @@ Update it whenever a requirement is added, changed, or completed.
 - 2026-11-08: known-good comparison passed with 15 checks and 0 mismatches.
 - 2026-11-08: idle connections remain high (about 1105-1131 clients, 12 active, most with no payload); root cause is still open.
 - 2026-11-08: repeated SSH probes from the same client IP began hanging while ping and TCP 22/443 stayed open, matching the documented source-IP blackhole; switching networks restores SSH. This blocked a final live rerun after the last cosmetic mjs change.
+- 2026-11-08: proxy TCP 443 accepted connections and the API client reached DC2, but repeated `Ping timeout of 5.0s` and `Connection to dc 2 closed` events prevented the new photo check from completing. A direct no-proxy run also timed out, so the current client network path is degraded; this is not a passing media verification.
