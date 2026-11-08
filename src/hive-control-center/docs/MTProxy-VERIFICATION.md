@@ -25,10 +25,11 @@ proxy worked during the runs above.
 ## Latest recheck limitation
 
 After the photo check was added, TCP 443 still accepted connections and the API
-client reached DC2, but repeated `Ping timeout of 5.0s` and `Connection to dc 2
-closed` events prevented the transfer. A direct `--no-proxy` run also timed out.
-The current client network path is degraded; this is not a passing photo/media
-verification. Re-run after switching networks.
+client reached DC2. A retry sent and verified the text marker, then stalled on
+the media upload with repeated `Ping timeout of 5.0s` and `Connection to dc 2
+closed` events. A direct `--no-proxy` run also timed out. Current status:
+messages work, media upload/download does not complete from this client network.
+This is not a passing photo/media verification. Re-run after switching networks.
 
 ## Repeatable commands
 
