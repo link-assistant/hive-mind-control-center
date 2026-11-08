@@ -10,5 +10,5 @@ CLAUDE.md
 docs/case-studies/*/data/
 dev/log/
 
-# Imported operational tooling is kept byte-for-byte as deployed
+# Operational tooling is maintained separately from the template
 src/hive-control-center/
