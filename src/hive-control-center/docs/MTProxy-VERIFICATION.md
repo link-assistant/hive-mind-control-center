@@ -80,7 +80,8 @@ bulk path is not throttled is required.
 
 A server-side `tcpdump -i any -nn -s0 -w /tmp/mtpcap.pcap 'tcp port 443'`
 capture ran for 80 seconds while the client ran a text check followed by
-`--roundtrip-photo`. The capture was filtered to `eth0` so Docker's
+`--roundtrip-photo`. The capture includes every client port-443 flow during that
+window, not only the API test. It was filtered to `eth0` so Docker's
 `veth`/`docker0` duplicate frames were not counted. The client source address
 is omitted here.
 
@@ -111,8 +112,11 @@ leg, not inside MTProxy.
 The upload path is also affected, but the capture shows the client only sent
 8.7 KB while the server sent 48.2 KB. The immediate failure is that the client
 cannot receive/ACK the server's response and data; a client-side capture was not
-possible because local `tcpdump` needs sudo. The pcap was analyzed on the server
-and deleted; it is not stored in this repository.
+possible because local `tcpdump` needs sudo, so upload-payload loss could not be
+separated from response loss. After the capture, a fresh text check reached
+`API_TEST_SENT=yes` and `API_TEST_CLEANED=yes`, confirming the proxy recovers
+when the path improves. The pcap was analyzed on the server and deleted; it is
+not stored in this repository.
 
 Current status: messages work, media upload/download does not complete from this
 client network. This is not a passing photo/media verification.
