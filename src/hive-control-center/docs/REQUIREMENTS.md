@@ -29,6 +29,7 @@ Update it whenever a requirement is added, changed, or completed.
 - [ ] Mitigate the idle client-connection backlog and the stalled media sends without changing the client network.
 - [x] Evaluate a TLS-camouflaged/FakeTLS transport on port 443 without switching networks; mtg with `contabo.com` fronting did not complete text, so it was rolled back.
 - [ ] Find another transport that survives this client network for media, or document that no in-network transport completes media.
+- [x] Record every tested configuration and its outcome in a single matrix (`docs/MTProxy-VERIFICATION.md`).
 
 ## Diagnostics and verification
 
@@ -74,3 +75,4 @@ Update it whenever a requirement is added, changed, or completed.
 - 2026-11-08: `telegrammessenger/proxy:2.0beta` (April 2026 build) was tested on port 8443 with the same secret. It produced the same ping timeouts, so the proxy binary/version is not the cause. The test container and its secret copy were removed.
 - 2026-11-08: the common variable left is the client network path (DPI/throttling of large MTProto transfers); direct DC connections also fail.
 - 2026-11-08: FakeTLS/mtg on port 443 (`ee` secret with `contabo.com` fronting) connected but text did not complete; it was rolled back to classic. Classic text passed again after a retry. FakeTLS is not the answer on this network.
+- 2026-11-08: classic with 4 workers and `nofile=524288` passed text immediately, but media upload, `@telegram` history receive, and profile-photo download still timed out. A `INTERNAL_PORT=443 PORT=8888` attempt produced no 443 listener and was discarded. FakeTLS with `www.google.com` and `vk.com`, and mtg `simple-run` with dd/hex secrets, also failed. The full tested matrix is in `docs/MTProxy-VERIFICATION.md`.

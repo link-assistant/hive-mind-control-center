@@ -56,6 +56,7 @@ server), so the secret never has to travel on a command line:
 | `MTPROXY_ENGINE` | `classic` | `classic` (supported) or `mtg` (experimental FakeTLS). |
 | `MTPROXY_PORT` | `443` | Host port to publish; the container always listens on `443`. Classic container name is `mtproxy-classic-<port>`. |
 | `MTPROXY_MSS` | `1200` | TCP MSS clamp applied in both directions. `1360` was too high on the mobile path. |
+| `MTPROXY_WORKERS` | `4` | Classic engine worker count (1-6). 4 workers kept ~850 clients responsive; each worker needs ~65552 open files. |
 | `MTPROXY_CLASSIC_IMAGE` | `mtproxy/mtproxy:latest` | Classic engine image. |
 | `MTPROXY_SECRET` | unset | Optional 32-char hex key (an mtg `ee...` secret is accepted and its key reused). Unset reuses the persisted key or generates one. |
 | `MTPROXY_IMAGE` | `nineseconds/mtg:2.3.0` | mtg-only image override. |
@@ -95,10 +96,13 @@ The secret is persisted root-only in
 `/root/.hive-mtproxy-classic-<port>/secret`; the container mounts that directory
 as `/data`.
 
-The classic image's `/run.sh` hardcodes `-C 60000` and asks the kernel for 65552
-open files. The deploy command pins `--ulimit nofile=524288:524288` so the engine
-can raise the limit. Do not lower the hard limit to 65536: the engine needs
-65552 and will crash-loop with `fatal: cannot raise open file limit to 65552`. The generated `tg://` link is written root-only to
+The classic image's `/run.sh` hardcodes `-C 60000` and asks the kernel for
+65552 open files **per worker**. The deploy command pins
+`--ulimit nofile=524288:524288` and passes `-e WORKERS=<n>`; the default is 4
+workers, which fits comfortably (`4 * 65552 = 262208`). Do not lower the hard
+limit to 65536: one worker already needs 65552 and will crash-loop with
+`fatal: cannot raise open file limit to 65552`. Six workers still fit; more than
+six would exceed 524288, so the deploy rejects them. The generated `tg://` link is written root-only to
 `/root/.hive-mtproxy-classic-<port>/link.txt` and is not printed into the deploy
 log unless `--dangerously-show-secrets` is used:
 

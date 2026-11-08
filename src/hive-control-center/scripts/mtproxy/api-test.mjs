@@ -23,6 +23,11 @@ const options = {
   noProxy: false,
   keep: false,
   media: process.env.MTPROXY_API_MEDIA === '1',
+  receiveMedia: process.env.MTPROXY_API_RECEIVE_MEDIA === '1',
+  receiveProfile: process.env.MTPROXY_API_RECEIVE_PROFILE || '',
+  chat: process.env.MTPROXY_API_CHAT || '@telegram',
+  receiveLimit: Number(process.env.MTPROXY_API_RECEIVE_LIMIT || '50'),
+  relaxPing: process.env.MTPROXY_API_RELAX_PING === '1',
 };
 
 for (let i = 0; i < args.length; i += 1) {
@@ -52,6 +57,11 @@ Options:
   --no-proxy                Connect directly, bypassing the proxy (diagnosis only)
   --keep                    Keep the marker messages in Saved Messages
   --media                   Also upload and download a small document
+  --receive-media           Download the latest photo from --chat (receive only)
+  --receive-profile <peer>  Download a profile photo (receive-only diagnostic)
+  --chat <peer>             Chat for --receive-media (default: @telegram)
+  --receive-limit <n>       Messages to scan for a photo (default: 50)
+  --relax-ping              Raise the diagnostic ping timeout (slow media)
   -h, --help                Show this help
 
 The session file must belong to the same API ID/hash. Never commit .env,
@@ -71,6 +81,11 @@ The session file must belong to the same API ID/hash. Never commit .env,
   else if (arg === '--no-proxy') options.noProxy = true;
   else if (arg === '--keep') options.keep = true;
   else if (arg === '--media') options.media = true;
+  else if (arg === '--receive-media') options.receiveMedia = true;
+  else if (arg === '--receive-profile') options.receiveProfile = next();
+  else if (arg === '--chat') options.chat = next();
+  else if (arg === '--receive-limit') options.receiveLimit = Number(next());
+  else if (arg === '--relax-ping') options.relaxPing = true;
   else throw new Error(`unknown option: ${arg}`);
 }
 
@@ -128,6 +143,9 @@ if (!options.apiId || !options.apiHash) {
   throw new Error('Telegram API ID/hash are required (--env-file or TELEGRAM_API_ID/TELEGRAM_API_HASH)');
 }
 if (!options.sessionFile) throw new Error('session file is required (--session-file or TELEGRAM_SESSION_FILE)');
+if (!Number.isInteger(options.receiveLimit) || options.receiveLimit < 1 || options.receiveLimit > 200) {
+  throw new Error(`invalid receive limit: ${options.receiveLimit}`);
+}
 const session = readFileSync(options.sessionFile, 'utf8').trim();
 if (!session) throw new Error('session file is empty');
 
@@ -139,6 +157,19 @@ const redact = (text) => {
   }
   return output;
 };
+
+if (options.relaxPing) {
+  const { Session } = require('teleproto/network/session/Session');
+  const timers = Session.prototype.timers;
+  Session.prototype.timers = function (now) {
+    const values = timers.call(this, now);
+    return {
+      ...values,
+      pingDisconnect: Math.max(values.pingDisconnect, 60),
+      readDisconnect: Math.max(values.readDisconnect, 60),
+    };
+  };
+}
 
 const client = new TelegramClient(
   new sessions.StringSession(session),
@@ -173,12 +204,53 @@ try {
   const me = await client.getMe();
   const user = me.username ? `@${me.username}` : String(me.id);
   console.log(`API_TEST_CONNECTED=yes user=${user}`);
-  const sent = await client.sendMessage('me', { message: marker });
-  if (sent?.id) sentIds.push(sent.id);
-  const messages = await client.getMessages('me', { limit: 5 });
-  const verified = messages.some((message) => message.message === marker);
-  console.log(`API_TEST_SENT=yes saved_messages_verified=${verified ? 'yes' : 'no'} marker=${marker}`);
-  if (!verified) throw new Error('sent message was not found in Saved Messages');
+
+  if (options.receiveProfile) {
+    const downloadedPhoto = await client.downloadProfilePhoto(options.receiveProfile, {});
+    const isJpeg =
+      Buffer.isBuffer(downloadedPhoto) &&
+      downloadedPhoto.length > 3 &&
+      downloadedPhoto[0] === 0xff &&
+      downloadedPhoto[1] === 0xd8 &&
+      downloadedPhoto[2] === 0xff;
+    const isPng =
+      Buffer.isBuffer(downloadedPhoto) &&
+      downloadedPhoto.length > 8 &&
+      downloadedPhoto.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    console.log(
+      `API_TEST_RECEIVE_PROFILE_DOWNLOADED=yes peer=${options.receiveProfile} bytes=${downloadedPhoto?.length || 0} verified=${isJpeg || isPng ? 'yes' : 'no'}`,
+    );
+    if (!(isJpeg || isPng)) throw new Error('profile photo download did not return a JPEG or PNG');
+  } else if (options.receiveMedia) {
+    const candidates = await client.getMessages(options.chat, { limit: options.receiveLimit });
+    const receivedPhoto = candidates.find((message) => message && message.photo);
+    if (!receivedPhoto) throw new Error(`no photo found in ${options.chat}`);
+    console.log(
+      `API_TEST_RECEIVE_MEDIA_FOUND=yes chat=${options.chat} message_id=${receivedPhoto.id}`,
+    );
+    const downloadedPhoto = await client.downloadMedia(receivedPhoto, {});
+    const isJpeg =
+      Buffer.isBuffer(downloadedPhoto) &&
+      downloadedPhoto.length > 3 &&
+      downloadedPhoto[0] === 0xff &&
+      downloadedPhoto[1] === 0xd8 &&
+      downloadedPhoto[2] === 0xff;
+    const isPng =
+      Buffer.isBuffer(downloadedPhoto) &&
+      downloadedPhoto.length > 8 &&
+      downloadedPhoto.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    const photoVerified = isJpeg || isPng;
+    console.log(
+      `API_TEST_RECEIVE_MEDIA_DOWNLOADED=yes chat=${options.chat} bytes=${downloadedPhoto?.length || 0} verified=${photoVerified ? 'yes' : 'no'}`,
+    );
+    if (!photoVerified) throw new Error('received media download did not return a JPEG or PNG');
+  } else {
+    const sent = await client.sendMessage('me', { message: marker });
+    if (sent?.id) sentIds.push(sent.id);
+    const messages = await client.getMessages('me', { limit: 5 });
+    const verified = messages.some((message) => message.message === marker);
+    console.log(`API_TEST_SENT=yes saved_messages_verified=${verified ? 'yes' : 'no'} marker=${marker}`);
+    if (!verified) throw new Error('sent message was not found in Saved Messages');
 
   if (options.media) {
     const caption = `${marker} media`;
@@ -225,6 +297,7 @@ try {
       downloadedPhoto[2] === 0xff;
     if (!photoVerified) throw new Error('photo download did not return a JPEG');
     console.log(`API_TEST_PHOTO_DOWNLOADED=yes bytes=${downloadedPhoto.length} verified=yes`);
+  }
   }
 
   if (options.keep) {

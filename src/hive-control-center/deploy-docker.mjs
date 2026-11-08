@@ -132,6 +132,11 @@ const config = makeConfig({
         default: getenv('MTPROXY_CLASSIC_IMAGE') || 'mtproxy/mtproxy:latest',
         description: 'Classic engine image (default mtproxy/mtproxy:latest; must read SECRET from /data/secret or env)',
       })
+      .option('mtproxy-workers', {
+        type: 'string',
+        default: getenv('MTPROXY_WORKERS') || '4',
+        description: 'Classic engine worker count (default 4; 1-6). More workers handle more clients but each needs ~65552 open files.',
+      })
       .option('mtproxy-port', {
         type: 'string',
         default: getenv('MTPROXY_PORT') || '443',
@@ -198,6 +203,7 @@ const MTPROXY_CLASSIC_DEFAULT_IMAGE = 'mtproxy/mtproxy:latest';
 const MTPROXY_CLASSIC_IMAGE = String(config.mtproxyClassicImage || MTPROXY_CLASSIC_DEFAULT_IMAGE).trim();
 const MTPROXY_MTG_IMAGE = String(config.mtproxyImage || MTPROXY_DEFAULT_IMAGE).trim();
 const MTPROXY_MSS = String(config.mtproxyMss || '1200').trim();
+const MTPROXY_WORKERS = String(config.mtproxyWorkers || '4').trim();
 const MTPROXY_ACTIVE_IMAGE = MTPROXY_ENGINE === 'classic' ? MTPROXY_CLASSIC_IMAGE : MTPROXY_MTG_IMAGE;
 // --mtproxy-only is the safe append-only entry point: it implies --mtproxy but
 // exits right after the proxy work, before ANY hive-mind teardown/restart.
@@ -815,6 +821,10 @@ const deployMtproxyClassic = async ({ appendOnly = false, forceUpdate = false } 
     console.error(`>>> ERROR: Invalid MTPROXY_PORT "${MTPROXY_HOST_PORT}" (expected 1-65535).`);
     process.exit(1);
   }
+  if (!/^\d+$/.test(MTPROXY_WORKERS) || Number(MTPROXY_WORKERS) < 1 || Number(MTPROXY_WORKERS) > 6) {
+    console.error(`>>> ERROR: Invalid MTPROXY_WORKERS "${MTPROXY_WORKERS}" (expected 1-6; 6 workers need ~393k open files).`);
+    process.exit(1);
+  }
   if (/mtg/i.test(MTPROXY_CLASSIC_IMAGE)) {
     console.error(`>>> ERROR: --mtproxy-classic-image "${MTPROXY_CLASSIC_IMAGE}" looks like mtg; use --mtproxy-engine mtg instead.`);
     process.exit(1);
@@ -856,13 +866,15 @@ const deployMtproxyClassic = async ({ appendOnly = false, forceUpdate = false } 
   if (update || !appendOnly) await run(`docker rm -f ${MTPROXY_CONTAINER}`, { ignoreErrors: true });
 
   // The 2019 image's /run.sh hardcodes `-C 60000` and asks the kernel for
-  // 65552 open files. Docker's default hard limit is 524288 on this host, but
-  // making it explicit avoids failures on hosts where the default is lower
-  // (`fatal: cannot raise open file limit to 65552`). Do NOT use 65536: the
-  // engine needs 65552, so a hard limit of exactly 65536 makes it crash-loop.
+  // 65552 open files per worker. Docker's default hard limit is 524288 on this
+  // host, but making it explicit avoids failures on hosts where the default is
+  // lower (`fatal: cannot raise open file limit to 65552`). Do NOT use 65536:
+  // one worker already needs 65552, so that hard limit makes it crash-loop.
+  // 4 workers keep ~850 clients responsive; 6 workers still fit in 524288.
   const runCmd = (
     `docker run -d --name ${MTPROXY_CONTAINER} --restart unless-stopped ` +
     `--ulimit nofile=524288:524288 ` +
+    `-e WORKERS=${MTPROXY_WORKERS} ` +
     `-p ${MTPROXY_HOST_PORT}:${MTPROXY_CONTAINER_PORT} -v ${MTPROXY_CLASSIC_CONFIG_DIR}:/data ` +
     `${MTPROXY_CLASSIC_IMAGE}`
   ).replace(/  +/g, ' ');
@@ -888,7 +900,7 @@ const deployMtproxyClassic = async ({ appendOnly = false, forceUpdate = false } 
   await installClassicMss();
   saveClassicLink(secret, publicIpv4);
 
-  console.log(`>>> MTProxy container is running (image: ${MTPROXY_CLASSIC_IMAGE}, engine: classic)`);
+  console.log(`>>> MTProxy container is running (image: ${MTPROXY_CLASSIC_IMAGE}, engine: classic, workers: ${MTPROXY_WORKERS})`);
   console.log(`>>>   Host port ${MTPROXY_HOST_PORT} -> container port ${MTPROXY_CONTAINER_PORT}`);
   console.log(`>>>   Secret: ${config.mtproxySecret ? 'pinned via MTPROXY_SECRET in .lenv' : `persisted in ${MTPROXY_CLASSIC_SECRET_PATH}`}`);
   if (config.verifyMtproxy) await verifyClassicMtproxy();

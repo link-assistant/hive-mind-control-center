@@ -72,6 +72,8 @@ Options:
   --no-known-good            Skip known-good comparison
   --api-test                 Send and verify a marker through MTProto
   --api-media                Also upload and download a small document through MTProto
+  --api-receive-profile <p>  Download a profile photo through MTProto (receive-only)
+  --api-receive-media <p>    Download the latest photo from a chat (receive-only)
   --telegram-env <path>      Telegram API credentials .env
   --telegram-session <path>  GramJS StringSession file
   -h, --help                 Show this help
@@ -99,6 +101,12 @@ variables, or the paths above. They are never printed or committed.`);
   else if (arg === '--api-media') {
     options.apiTest = true;
     options.apiMedia = true;
+  } else if (arg === '--api-receive-profile') {
+    options.apiTest = true;
+    options.apiReceiveProfile = next();
+  } else if (arg === '--api-receive-media') {
+    options.apiTest = true;
+    options.apiReceiveMedia = next();
   }
   else if (arg === '--telegram-env') options.telegramEnvFile = next();
   else if (arg === '--telegram-session') options.telegramSessionFile = next();
@@ -566,6 +574,8 @@ const runApiTest = () => {
       '--lenv',
       options.lenvFile,
       ...(options.apiMedia ? ['--media'] : []),
+      ...(options.apiReceiveProfile ? ['--receive-profile', options.apiReceiveProfile] : []),
+      ...(options.apiReceiveMedia ? ['--receive-media', '--chat', options.apiReceiveMedia] : []),
     ],
     { env: { MTPROXY_SECRET_KEY: secretKey } },
   );
