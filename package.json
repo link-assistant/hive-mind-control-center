@@ -78,6 +78,7 @@
     "lino-arguments": "0.4.0",
     "lint-staged": "^16.4.0",
     "prettier": "^3.6.2",
+    "teleproto": "^1.232.0",
     "test-anywhere": "^0.8.48",
     "yaml": "2.9.1"
   },

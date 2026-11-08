@@ -86,7 +86,7 @@ Tracked in: https://github.com/link-assistant/hive-mind/issues/1505
 
 ## Temporary workaround (in deploy scripts)
 
-Until the Dockerfiles are fixed, the deploy scripts (`deploy-docker.mjs`, `docker-restart-remotely.mjs`, `update-docker.mjs`, `update-docker.sh`) apply a runtime workaround before running `bun install -g`:
+Until the Dockerfiles are fixed, the deploy scripts (`deploy-docker.mjs`, `docker-restart-remotely.mjs`, `update-docker.mjs`) apply a runtime workaround before running `bun install -g`:
 
 ```bash
 docker exec -u root $CONTAINER mkdir -p /workspace/.local/share /workspace/.local/state

@@ -161,7 +161,7 @@ Classic verification checks:
 For local/remote diagnostics use:
 
 ```bash
-./diagnose-mtproxy.sh
+./diagnose-mtproxy.mjs
 ```
 
 It defaults to the classic container `mtproxy-classic-443` and auto-falls back
@@ -173,8 +173,20 @@ For a hands-off end-to-end text/media check, restart Telegram automatically and
 capture packets:
 
 ```bash
-./diagnose-mtproxy.sh --capture --restart-telegram --capture-seconds 20
+./diagnose-mtproxy.mjs --capture --restart-telegram --capture-seconds 20
 ```
+
+For a protocol-level text check that does not touch the visual app:
+
+```bash
+TELEGRAM_ENV_FILE=/path/to/telegram.env ./diagnose-mtproxy.mjs --api-test --no-report
+TELEGRAM_ENV_FILE=/path/to/telegram.env ./diagnose-mtproxy.mjs --api-media --no-report
+```
+
+The API test sends a unique marker to Saved Messages, reads it back, and
+deletes it. `--api-media` also uploads a tiny document, downloads it again,
+and compares SHA-256 before deleting both messages. Use `--telegram-session` when the session file is not next to the
+environment file.
 
 The analyzer reports `CAPTURE_CLIENT_BYTES` and `CAPTURE_PROXY_BYTES`. If
 `CAPTURE_CLIENT_BYTES=0` the TCP handshake works but client payload is not
@@ -211,7 +223,7 @@ Known operational recovery:
   mobile network; a new source IP usually restores it.
 - After a network change, Telegram can keep stale transport state and log
   `dc2 ... no response for 20/40/80 s, invalidating the transport scheme`.
-  `./diagnose-mtproxy.sh --capture --restart-telegram` clears it and proves the
+  `./diagnose-mtproxy.mjs --capture --restart-telegram` clears it and proves the
   fresh path with a bidirectional packet capture.
 - A known-good snapshot of the working classic setup is stored root-only at
   `/root/mtproxy-known-good-20261107-0740/`; keep it for rollback/reference.

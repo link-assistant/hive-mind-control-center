@@ -8,7 +8,8 @@ auto-fix tooling for the hive-mind host and its optional MTProto proxy.
 
 - `deploy-docker.mjs`: local Docker deployment entry point.
 - `deploy-remote-docker.mjs`: remote deployment over SSH/SFTP.
-- `diagnose-mtproxy.sh`: end-to-end Telegram MTProto proxy diagnostics.
+- `update-docker.mjs`: update the running hive-mind container and restart the bot.
+- `diagnose-mtproxy.mjs`: end-to-end Telegram MTProto proxy diagnostics, including API text verification.
 - `scripts/mtproxy/`: mjs parsers for app config, sockets, pcap, and known-good profiles.
 - `auto-fix/`: host diagnostics and cleanup helpers.
 - `docs/DEPLOY.md`: deployment and recovery runbook.
@@ -21,7 +22,9 @@ Run these commands from this directory so relative paths resolve:
 ```bash
 cp .lenv.example .lenv
 node deploy-remote-docker.mjs --mtproxy-only --mtproxy-update --verify-mtproxy
-./diagnose-mtproxy.sh --capture --restart-telegram --strict
+./diagnose-mtproxy.mjs --capture --restart-telegram --strict
+TELEGRAM_ENV_FILE=/path/to/telegram.env ./diagnose-mtproxy.mjs --api-test --media-seconds 0
+TELEGRAM_ENV_FILE=/path/to/telegram.env ./diagnose-mtproxy.mjs --api-media --media-seconds 0
 ```
 
 Diagnostics are written to `data/diagnostics/` by default. Do not commit

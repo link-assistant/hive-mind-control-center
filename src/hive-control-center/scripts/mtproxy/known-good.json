@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "recordedAt": "2026-11-08T10:05:13Z",
-  "recordedBy": "diagnose-mtproxy.sh / deploy-docker.mjs classic engine",
+  "recordedBy": "diagnose-mtproxy.mjs / deploy-docker.mjs classic engine",
   "description": "Known-good classic MTProto proxy profile that carried text messages and media for the macOS Telegram client.",
   "container": {
     "name": "mtproxy-classic-443",
@@ -102,7 +102,7 @@
     ]
   },
   "recovery": [
-    "If Telegram logs dc2 no-response after a network change, run ./diagnose-mtproxy.sh --capture --restart-telegram.",
+    "If Telegram logs dc2 no-response after a network change, run ./diagnose-mtproxy.mjs --capture --restart-telegram or ./diagnose-mtproxy.mjs --api-test.",
     "If SSH auth hangs while TCP/ping works, the client source IP may be blackholed; switch network.",
     "If the container is missing, run ./deploy-remote-docker.mjs --mtproxy-only --mtproxy-update --verify-mtproxy."
   ]
