@@ -214,6 +214,8 @@ MTPROXY_PORT: 443
 # high on the mobile path; 1200 is the known-good value. Persisted via
 # mtproxy-mss.service and re-applied on reboot.
 MTPROXY_MSS: 1200
+# Classic worker count (1-6). Each worker needs ~65552 open files.
+MTPROXY_WORKERS: 4
 # Classic engine image (official mtproto-proxy; reads the persisted secret).
 MTPROXY_CLASSIC_IMAGE: mtproxy/mtproxy:latest
 # mtg-only settings (ignored by the classic engine):
@@ -329,6 +331,11 @@ const config = makeConfig({
         type: 'string',
         default: getenv('MTPROXY_MSS') || '1200',
         description: 'TCP MSS clamp forwarded to deploy-docker.mjs (default 1200).',
+      })
+      .option('mtproxy-workers', {
+        type: 'string',
+        default: getenv('MTPROXY_WORKERS') || '4',
+        description: 'Classic proxy worker count forwarded to deploy-docker.mjs (default 4; 1-6).',
       })
       .option('mtproxy-classic-image', {
         type: 'string',
@@ -1795,6 +1802,7 @@ const runMtproxyOnly = async () => {
     `--mtproxy-engine ${MTPROXY_ENGINE}`,
     `--mtproxy-port ${MTPROXY_PORT}`,
     config.mtproxyMss ? `--mtproxy-mss ${JSON.stringify(config.mtproxyMss)}` : '',
+    config.mtproxyWorkers ? `--mtproxy-workers ${JSON.stringify(config.mtproxyWorkers)}` : '',
     config.mtproxyImage ? `--mtproxy-image ${JSON.stringify(config.mtproxyImage)}` : '',
     config.mtproxyClassicImage ? `--mtproxy-classic-image ${JSON.stringify(config.mtproxyClassicImage)}` : '',
     config.mtproxyFrontingHost ? `--mtproxy-fronting-host ${JSON.stringify(config.mtproxyFrontingHost)}` : '',
@@ -2543,6 +2551,7 @@ const remoteArgs = [
   config.mtproxy ? `--mtproxy-engine ${MTPROXY_ENGINE}` : '',
   config.mtproxy ? `--mtproxy-port ${MTPROXY_PORT}` : '',
   config.mtproxyMss ? `--mtproxy-mss ${JSON.stringify(config.mtproxyMss)}` : '',
+  config.mtproxyWorkers ? `--mtproxy-workers ${JSON.stringify(config.mtproxyWorkers)}` : '',
   config.mtproxyImage ? `--mtproxy-image ${JSON.stringify(config.mtproxyImage)}` : '',
   config.mtproxyClassicImage ? `--mtproxy-classic-image ${JSON.stringify(config.mtproxyClassicImage)}` : '',
   config.mtproxyFrontingHost ? `--mtproxy-fronting-host ${JSON.stringify(config.mtproxyFrontingHost)}` : '',

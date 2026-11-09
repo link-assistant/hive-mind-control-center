@@ -55,6 +55,8 @@ MTPROXY_PORT: 443
 # high on the mobile path; 1200 is the known-good value. Persisted via
 # mtproxy-mss.service and re-applied on reboot.
 MTPROXY_MSS: 1200
+# Classic worker count (1-6). Each worker needs ~65552 open files.
+MTPROXY_WORKERS: 4
 # Classic engine image (official mtproto-proxy; reads the persisted secret).
 MTPROXY_CLASSIC_IMAGE: mtproxy/mtproxy:latest
 # mtg-only settings (ignored by the classic engine):

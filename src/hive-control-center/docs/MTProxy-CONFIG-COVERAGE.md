@@ -1,5 +1,7 @@
 # MTProxy configuration coverage
 
+Run `scripts/mtproxy/proxy-matrix.mjs` to redeploy and compare these configurations per network; see `MTProxy-MATRIX.md`.
+
 Audited on 2026-11-08 against the classic `mtproxy-classic-443` deployment and
 the diagnostics in `scripts/mtproxy/`. Tested results and packet evidence are in
 `MTProxy-VERIFICATION.md`; untried ideas are in `MTProxy-RESEARCH-BACKLOG.md`.

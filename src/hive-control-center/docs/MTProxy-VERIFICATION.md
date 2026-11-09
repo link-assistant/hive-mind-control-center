@@ -3,7 +3,8 @@
 Verified on 2026-11-08 against `161.97.177.66:443` with the classic
 `mtproxy-classic-443` container. See `MTProxy-RESEARCH-BACKLOG.md` for untried
 experiments, `MTProxy-CONFIG-COVERAGE.md` for every supported option and its
-status, and "Correlated client/server logging" below for two-sided captures.
+status, `MTProxy-MATRIX.md` for the per-network redeploy-and-test matrix, and
+"Correlated client/server logging" below for two-sided captures.
 
 ## Results
 
@@ -230,29 +231,29 @@ Server diagnostics were therefore run through a temporary outbound-only remote
 execution path; no client network was switched. The proxy itself stayed
 reachable and served the API checks.
 
-## Repository audit (2026-11-08)
+## Repository audit (2026-11-09)
 
 The GitHub source of truth is the nested clone at
 `/Users/konard/Code/Archive/link-assistant/hive-control-center/repository`,
 remote `https://github.com/link-assistant/hive-mind-control-center.git`, branch
-`main`. At audit time it was clean and tracking `origin/main`; the last
-verification commit was `31d7f3b`.
+`main`. It was compared with the parent workspace on 2026-11-09 and the nested
+clone is the newer source of truth.
 
 All active source and logic under
 `repository/src/hive-control-center` is tracked and pushed, including
-`deploy-docker.mjs`, `diagnose-mtproxy.mjs`, `scripts/mtproxy/api-test.mjs`,
+`deploy-docker.mjs`, `deploy-remote-docker.mjs`, `diagnose-mtproxy.mjs`,
+`scripts/mtproxy/api-test.mjs`, `scripts/mtproxy/proxy-matrix.mjs`,
 `scripts/mtproxy/solid-photo.mjs`, the diagnostics modules, docs, and tests.
 
 The parent workspace is an older duplicate checkout with its own local git
 repository. Its active source files have the same content as the nested source
 of truth, except `deploy-docker.mjs`, `docs/DEPLOY.md`,
-`docs/workspace-permissions-research.md`, and
-`scripts/mtproxy/known-good.json`, which are older in the parent. The parent
-copies of `diagnose-mtproxy.sh` and `update-docker.sh` are retired; their `.mjs`
-replacements are in the nested repository. Parent `auto-fix` source files match
-the nested repository; its only content difference is an extra trailing newline
-in `auto-fix/issue-footer.md`. The parent repository has no remote and is not
-the GitHub source of truth.
+`docs/workspace-permissions-research.md`, `scripts/mtproxy/known-good.json`, and
+`auto-fix/issue-footer.md`, which are older in the parent. Parent `auto-fix`
+files, including the currently uncommitted helpers, are byte-identical to the
+nested commit. The parent copies of `diagnose-mtproxy.sh` and `update-docker.sh`
+are retired; their `.mjs` replacements are in the nested repository. The parent
+repository has no remote and is not the GitHub source of truth.
 
 Private or generated data is deliberately excluded: `.lenv`, `.env`,
 `.telegram_session`, `data/`, `case-data/`, logs, pcap files, reports,

@@ -43,6 +43,7 @@ Update it whenever a requirement is added, changed, or completed.
 - [x] Analyze retransmits, duplicate ACKs, RSTs, and server-sequence/client-ACK gaps and compare client-transmitted with server-received bytes.
 - [x] Provide `compare-summary.mjs` and `--compare` for old-versus-new run comparison.
 - [x] Audit every deployment, client/API, diagnostic, and path option in `docs/MTProxy-CONFIG-COVERAGE.md`.
+- [x] Provide a per-network matrix that redeploys the proxy between configurations, records every result, and automatically restores/keeps the best one.
 - [x] Move the remaining shell diagnostics to `.mjs` and keep the shell-free path as the default.
 - [ ] Add CI-safe syntax and behavior tests for the imported mjs diagnostics.
 - [x] Add a `--help` contract and argument validation for the mjs diagnostics entry point.
@@ -87,3 +88,4 @@ Update it whenever a requirement is added, changed, or completed.
 - 2026-11-08: repository audit confirmed active source is tracked and pushed in the nested `repository` clone; parent workspace copies are older duplicates, and retired `.sh` files are not part of the source of truth. Private `.lenv`, data, logs, pcap, and sessions remain untracked.
 - 2026-11-08: added correlated two-sided logging. Each diagnostic run now writes a timestamped log plus summary JSON, records client and server TCP counters and configuration, analyzes pcap retransmits/ACK gaps/RSTs, supports optional client capture, and can diff two summaries. The full option inventory is in `docs/MTProxy-CONFIG-COVERAGE.md`.
 - 2026-11-08: live failure-path run produced log and summary JSON; SSH auth stalled after key exchange, server capture did not start, and client capture was marked skipped rather than falsely reported as absent. Added `--ssh-timeout` and `--api-timeout` so unreachable-server runs terminate with a summary.
+- 2026-11-09: added `scripts/mtproxy/proxy-matrix.mjs`. It performs proxy-only redeploys between configurations, tests text/media/photo through each, writes JSON/Markdown summaries, scores the results, redeploys the best available configuration, and cleans up other matrix containers. Documented in `docs/MTProxy-MATRIX.md`.

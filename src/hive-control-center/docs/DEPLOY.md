@@ -45,7 +45,14 @@ server, client Send-Q stuck at 1534, media DCs timing out).
 
 # Safe append-only path: add or verify the proxy without touching hive-mind
 ./deploy-remote-docker.mjs --mtproxy-only --verify-mtproxy
+
+# Test several proxy configurations from this network and keep the best one
+TELEGRAM_ENV_FILE=/path/to/telegram.env node scripts/mtproxy/proxy-matrix.mjs
 ```
+
+See `MTProxy-MATRIX.md` for the configuration matrix, scoring, and per-network
+workflow. `--mtproxy-workers` is forwarded by `deploy-remote-docker.mjs` and
+`deploy-docker.mjs`; it overrides `MTPROXY_WORKERS` from `.lenv`.
 
 The proxy is **off by default**. It can also be enabled persistently in `.lenv`
 with `DEPLOY_MTPROXY: true`. Its settings live in `.lenv` (copied to the

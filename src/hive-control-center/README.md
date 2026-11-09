@@ -10,9 +10,12 @@ auto-fix tooling for the hive-mind host and its optional MTProto proxy.
 - `deploy-remote-docker.mjs`: remote deployment over SSH/SFTP.
 - `update-docker.mjs`: update the running hive-mind container and restart the bot.
 - `diagnose-mtproxy.mjs`: end-to-end Telegram MTProto proxy diagnostics, including API text verification.
-- `scripts/mtproxy/`: mjs parsers for app config, sockets, pcap, and known-good profiles.
+- `scripts/mtproxy/`: mjs parsers for app config, sockets, pcap, known-good profiles, API tests, and the proxy configuration matrix.
+- `scripts/mtproxy/proxy-matrix.mjs`: redeploys and tests multiple proxy configurations, then keeps the best one.
 - `auto-fix/`: host diagnostics and cleanup helpers.
 - `docs/DEPLOY.md`: deployment and recovery runbook.
+- `docs/MTProxy-MATRIX.md`: per-network proxy configuration matrix and selection logic.
+- `docs/MTProxy-CONFIG-COVERAGE.md`: every MTProxy/deployment option and its tested status.
 - `.lenv.example`: configuration template; copy it to `.lenv` and fill in values.
 
 ## Usage
@@ -25,6 +28,8 @@ node deploy-remote-docker.mjs --mtproxy-only --mtproxy-update --verify-mtproxy
 ./diagnose-mtproxy.mjs --capture --restart-telegram --strict
 TELEGRAM_ENV_FILE=/path/to/telegram.env ./diagnose-mtproxy.mjs --api-test --media-seconds 0
 TELEGRAM_ENV_FILE=/path/to/telegram.env ./diagnose-mtproxy.mjs --api-media --media-seconds 0
+node scripts/mtproxy/proxy-matrix.mjs --list
+TELEGRAM_ENV_FILE=/path/to/telegram.env node scripts/mtproxy/proxy-matrix.mjs
 ```
 
 Diagnostics are written to `data/diagnostics/` by default. Do not commit

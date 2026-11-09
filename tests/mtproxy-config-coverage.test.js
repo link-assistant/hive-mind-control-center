@@ -6,8 +6,10 @@ import { describe, expect, it } from 'test-anywhere';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const sourceFiles = [
   'src/hive-control-center/deploy-docker.mjs',
+  'src/hive-control-center/deploy-remote-docker.mjs',
   'src/hive-control-center/diagnose-mtproxy.mjs',
   'src/hive-control-center/scripts/mtproxy/api-test.mjs',
+  'src/hive-control-center/scripts/mtproxy/proxy-matrix.mjs',
 ];
 const docsFile = join(
   root,
