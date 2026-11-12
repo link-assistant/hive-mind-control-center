@@ -1,3 +1,20 @@
+# Live cleanup of all failed task containers
+
+When no preservation backup is needed, select every stopped failed task
+container from start-command's records and run the installed `hive-cleanup` CLI
+through auto-fix. Tasks that still have a running container are kept:
+
+```sh
+node auto-fix.mjs --cleanup-all-failed --dry-run
+node auto-fix.mjs --cleanup-all-failed
+```
+
+The selection excludes exit-0 containers, tasks with any running family
+container, tasks being resumed, and tasks whose target cannot be determined.
+The guarded Docker adapter only exposes the selected stopped failures plus the
+running containers, so hive-cleanup cannot remove an active task. This mode runs
+no preservation backup, reporting, recovery, ordinary cleanup, or DSS.
+
 # Targeted cleanup of preserved failures
 
 Run the actual installed `hive-cleanup` CLI through auto-fix after preserving

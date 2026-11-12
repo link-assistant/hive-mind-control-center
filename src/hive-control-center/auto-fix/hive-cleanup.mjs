@@ -5,7 +5,12 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 
 const targets = PARAMS.manifest.targets;
-if (!PARAMS.backupVerified || PARAMS.manifest.preservationVerified !== true) throw new Error('Host backup verification must succeed first');
+const live = PARAMS.liveSelection === true;
+if (live) {
+  if (PARAMS.manifest?.selection?.mode !== 'live-all-failed') throw new Error('Live selection is invalid');
+} else if (!PARAMS.backupVerified || PARAMS.manifest.preservationVerified !== true) {
+  throw new Error('Host backup verification must succeed first');
+}
 const inspect = (name) => {
   const r = spawnSync('docker', ['inspect', name], { encoding: 'utf8' });
   if (r.status !== 0) {
@@ -54,7 +59,7 @@ const protectedStates = before.map((c) => {
   const after = inspect(c.Id);
   return { name: c.Name.slice(1), id: c.Id, beforePid: c.State.Pid, afterPid: after?.State.Pid ?? null, status: after?.State.Status ?? 'missing', sameStartedAt: c.State.StartedAt === after?.State.StartedAt };
 });
-if (!PARAMS.dry && states.every((s) => !s.remaining)) {
+if (!live && !PARAMS.dry && states.every((s) => !s.remaining)) {
   const stateFile = path.join(os.homedir(), '.hive-mind/state/auto-fix-reports.json');
   const state = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : { reported: {} };
   state.reported ||= {};
@@ -70,4 +75,4 @@ if (!PARAMS.dry && states.every((s) => !s.remaining)) {
 const protectedUnchanged = protectedStates.every((s) => s.status !== 'missing' && s.sameStartedAt && (s.status !== 'running' || s.beforePid === s.afterPid) && (s.name !== 'hive-mind' || s.status === 'running'));
 const plannedCount = Number(/docker remove (\d+)/.exec(result.stdout || '')?.[1] ?? -1);
 const success = result.status === 0 && plannedCount === targets.length && protectedUnchanged && (PARAMS.dry || states.every((s) => !s.remaining));
-console.log('AF_JSON:' + JSON.stringify({ success, dry: PARAMS.dry, exit: result.status, plannedCount, output: result.stdout || '', error: result.stderr || result.error?.message || null, states, protected: protectedStates }));
+console.log('AF_JSON:' + JSON.stringify({ success, live, dry: PARAMS.dry, exit: result.status, plannedCount, output: result.stdout || '', error: result.stderr || result.error?.message || null, states, protected: protectedStates }));
