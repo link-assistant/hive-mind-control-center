@@ -163,6 +163,35 @@ never touches hive-mind:
 `--reset-docker`, `--verify-reboot`, `--prepare`, `--backup-only`, or
 `--clean-temp-archives`.
 
+### Removing or temporarily stopping the proxy
+
+Both removal modes touch **only** the MTProxy runtime and its MSS hook. They
+never stop, restart, prune, or reconfigure hive-mind or any other container.
+
+```bash
+# Permanent runtime removal: remove the proxy container, MSS unit, and rules.
+# The root-only secret/config and image are kept, so a later deploy reuses the
+# same Telegram link.
+./deploy-remote-docker.mjs --mtproxy-undeploy
+
+# Temporary pause: stop the proxy container and disable its MSS unit/rules, but
+# keep the container, config, secret, and image. Resume with --mtproxy-only.
+./deploy-remote-docker.mjs --mtproxy-undeploy-temporary
+
+# Resume (starts the preserved container without recreating it)
+./deploy-remote-docker.mjs --mtproxy-only --verify-mtproxy
+```
+
+`--mtproxy-undeploy` deletes `/etc/systemd/system/mtproxy-mss.service` and
+`/usr/local/sbin/mtproxy-mss.sh`; the temporary mode leaves those files in place
+but disabled. Neither mode deletes `/root/.hive-mtproxy-classic-<port>/` (secret
+and link) or the proxy image. Use `--mtproxy-only --mtproxy-update` after a
+permanent undeploy to recreate the container with the preserved secret.
+
+The removal modes are mutually exclusive with each other and cannot be combined
+with `--mtproxy-only`, `--mtproxy-update`, `--verify-mtproxy`, `--reset-docker`,
+`--verify-reboot`, `--prepare`, `--backup-only`, or `--clean-temp-archives`.
+
 ### Verification
 
 Classic verification checks:

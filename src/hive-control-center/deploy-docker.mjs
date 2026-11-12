@@ -112,6 +112,16 @@ const config = makeConfig({
         default: (getenv('MTPROXY_UPDATE') || '').toLowerCase() === 'true',
         description: 'Recreate ONLY the mtproxy container to apply a new image/config. Safe with --mtproxy-only; hive-mind is never touched.',
       })
+      .option('mtproxy-undeploy', {
+        type: 'boolean',
+        default: false,
+        description: 'Remove ONLY the MTProxy runtime: stop/remove its container, disable and remove its MSS unit/rules. Keeps the root-only secret/config so a later deploy reuses the same Telegram link; hive-mind and all other containers are untouched.',
+      })
+      .option('mtproxy-undeploy-temporary', {
+        type: 'boolean',
+        default: false,
+        description: 'Temporarily stop ONLY MTProxy: stop its container and disable its MSS unit/rules while preserving the container, config, secret, and image for a later --mtproxy-only start. Hive-mind and all other containers are untouched.',
+      })
       .option('mtproxy-engine', {
         choices: ['classic', 'mtg'],
         default: getenv('MTPROXY_ENGINE') || 'classic',
@@ -209,6 +219,11 @@ const MTPROXY_ACTIVE_IMAGE = MTPROXY_ENGINE === 'classic' ? MTPROXY_CLASSIC_IMAG
 // exits right after the proxy work, before ANY hive-mind teardown/restart.
 const MTPROXY_ONLY = config.mtproxyOnly === true;
 if (MTPROXY_ONLY) config.mtproxy = true;
+// Dedicated removal paths. They exit before the deploy/append-only branches, so
+// neither can ever reach hive-mind teardown or image pruning.
+const MTPROXY_UNDEPLOY = config.mtproxyUndeploy === true;
+const MTPROXY_UNDEPLOY_TEMPORARY = config.mtproxyUndeployTemporary === true;
+const MTPROXY_REMOVE = MTPROXY_UNDEPLOY || MTPROXY_UNDEPLOY_TEMPORARY;
 
 // Per-variant settings. Both images default USER to box and run user-level
 // tools out of /home/box. The dind image additionally runs an inner dockerd
@@ -739,6 +754,66 @@ const verifyClassicMss = async () => {
   console.log(`>>>   MSS ${mss} present for ${ports.map((p) => `:${p}`).join(', ')} (both directions)`);
 };
 
+const mtproxyMssPorts = () => [...new Set([MTPROXY_HOST_PORT, '443', '8443'])]
+  .filter((port) => /^\d+$/.test(port));
+
+// Remove the MSS clamp that deployMtproxyClassic installed. For a temporary
+// undeploy the unit/script stay on disk (disabled) so a later --mtproxy-only
+// can re-enable them; for a permanent undeploy they are deleted. In both cases
+// the proxy's iptables rules are removed first, because a stopped container must
+// not keep rewriting MSS on a port that another service may now use.
+const removeMtproxyMss = async ({ removeFiles = false } = {}) => {
+  await run('systemctl stop mtproxy-mss.service 2>/dev/null || true', { silent: true, ignoreErrors: true });
+  await run('systemctl disable mtproxy-mss.service 2>/dev/null || true', { silent: true, ignoreErrors: true });
+  const deleteRules = mtproxyMssPorts()
+    .flatMap((port) => ['sport', 'dport'].map((direction) =>
+      `iptables -t mangle -D FORWARD -p tcp --${direction} ${port} --tcp-flags SYN,RST SYN -j TCPMSS --set-mss ${MTPROXY_MSS} 2>/dev/null || true`))
+    .join('; ');
+  await run(deleteRules, { silent: true, ignoreErrors: true });
+  if (removeFiles) {
+    await run('rm -f /etc/systemd/system/mtproxy-mss.service /usr/local/sbin/mtproxy-mss.sh', { silent: true, ignoreErrors: true });
+    await run('systemctl daemon-reload && systemctl reset-failed mtproxy-mss.service 2>/dev/null || true', { silent: true, ignoreErrors: true });
+  }
+  console.log(`>>>   MSS clamp ${removeFiles ? 'removed' : 'disabled and rules removed'} for ports ${mtproxyMssPorts().join(', ')}`);
+};
+
+// Stop or remove ONLY the proxy runtime. The secret/config directory and image
+// are deliberately preserved: a later deploy therefore reuses the same
+// Telegram link, and nothing outside the proxy container/MSS hook is touched.
+const undeployMtproxy = async ({ temporary = false } = {}) => {
+  const status = await getContainerStatus(MTPROXY_CONTAINER);
+  if (temporary) {
+    if (status === 'running') {
+      await run(`docker stop ${MTPROXY_CONTAINER}`, { silent: true });
+      console.log(`>>>   Stopped ${MTPROXY_CONTAINER} (container and config kept for restart).`);
+    } else {
+      console.log(`>>>   ${MTPROXY_CONTAINER} is ${status}; nothing to stop.`);
+    }
+    await removeMtproxyMss({ removeFiles: false });
+    const after = await getContainerStatus(MTPROXY_CONTAINER);
+    if (after === 'running') {
+      console.error(`>>> ERROR: ${MTPROXY_CONTAINER} is still running after the temporary undeploy.`);
+      process.exit(1);
+    }
+    console.log(`>>> ✅ MTProxy temporarily undeployed (${after}); config, secret, image, and container preserved.`);
+    return;
+  }
+
+  if (status !== 'not_found') {
+    await run(`docker rm -f ${MTPROXY_CONTAINER}`, { silent: true });
+    console.log(`>>>   Removed ${MTPROXY_CONTAINER}.`);
+  } else {
+    console.log(`>>>   ${MTPROXY_CONTAINER} is not present; nothing to remove.`);
+  }
+  await removeMtproxyMss({ removeFiles: true });
+  const after = await getContainerStatus(MTPROXY_CONTAINER);
+  if (after !== 'not_found') {
+    console.error(`>>> ERROR: ${MTPROXY_CONTAINER} still exists after the undeploy (status: ${after}).`);
+    process.exit(1);
+  }
+  console.log('>>> ✅ MTProxy undeployed; config/secret and image preserved so redeploy keeps the same Telegram link.');
+};
+
 const saveClassicLink = (secret, publicIpv4) => {
   if (!publicIpv4) return;
   const link = `tg://proxy?server=${publicIpv4}&port=${MTPROXY_HOST_PORT}&secret=dd${secret}`;
@@ -807,6 +882,9 @@ const deployMtproxyClassic = async ({ appendOnly = false, forceUpdate = false } 
       }
       if (started?.code === 0 && startedStatus === 'running') {
         console.log(`>>> MTProxy "${MTPROXY_CONTAINER}" is running again (same container and config).`);
+        // A temporary undeploy intentionally disables the MSS unit; restarting
+        // the preserved container must restore the clamp before verification.
+        await installClassicMss();
         if (config.verifyMtproxy) await verifyClassicMtproxy();
         return;
       }
@@ -1070,10 +1148,39 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(sig, () => { releaseLock(); process.exit(130); });
 }
 
+if (MTPROXY_UNDEPLOY && MTPROXY_UNDEPLOY_TEMPORARY) {
+  console.error('>>> ERROR: --mtproxy-undeploy and --mtproxy-undeploy-temporary are mutually exclusive.');
+  process.exit(1);
+}
+if (MTPROXY_REMOVE) {
+  const conflicts = [];
+  if (MTPROXY_ONLY) conflicts.push('--mtproxy-only');
+  if (config.mtproxyUpdate) conflicts.push('--mtproxy-update');
+  if (config.verifyMtproxy) conflicts.push('--verify-mtproxy');
+  if (config.resetDocker) conflicts.push('--reset-docker');
+  if (conflicts.length) {
+    console.error(`>>> ERROR: --mtproxy-undeploy${MTPROXY_UNDEPLOY_TEMPORARY ? '-temporary' : ''} cannot be combined with: ${conflicts.join(', ')}.`);
+    console.error('>>>        It is a dedicated proxy-removal path; it never deploys or verifies the proxy.');
+    process.exit(1);
+  }
+}
 if (MTPROXY_ONLY && config.resetDocker) {
   console.error('>>> ERROR: --mtproxy-only cannot be combined with --reset-docker.');
   console.error('>>>        Append-only mode must not remove hive-mind images, volumes, or containers.');
   process.exit(1);
+}
+
+// ── MTProxy removal path ─────────────────────────────────────────────────────
+// Exit before the append-only deploy, Docker reset, orphan cleanup, hive-mind
+// pull/rm/run, and image/volume pruning. Only the proxy container and its MSS
+// hook are touched; hive-mind and every unrelated container are left alone.
+if (MTPROXY_REMOVE) {
+  nextStep(MTPROXY_UNDEPLOY_TEMPORARY
+    ? 'MTProxy-temporary-undeploy: stopping the proxy without touching hive-mind'
+    : 'MTProxy-undeploy: removing the proxy without touching hive-mind');
+  await undeployMtproxy({ temporary: MTPROXY_UNDEPLOY_TEMPORARY });
+  console.log('>>> ✅ MTProxy removal run complete (hive-mind untouched).');
+  process.exit(0);
 }
 
 // ── Append-only MTProxy path ──────────────────────────────────────────────────

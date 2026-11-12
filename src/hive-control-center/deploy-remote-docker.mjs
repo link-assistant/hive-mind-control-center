@@ -63,8 +63,10 @@ const IS_PREPARE_RUN = process.argv.includes('--prepare') || (process.env.PREPAR
 // --mtproxy-only is append-only and may be run while the previous deploy log is
 // still useful; give it a separate file so it never truncates that log.
 const IS_MTPROXY_ONLY_RUN = process.argv.includes('--mtproxy-only') || (process.env.MTPROXY_ONLY || '').toLowerCase() === 'true';
+const IS_MTPROXY_UNDEPLOY_RUN = process.argv.includes('--mtproxy-undeploy') || process.argv.includes('--mtproxy-undeploy-temporary');
 const LOG_FILE = process.env.LOG_FILE
   || resolve(__dirname, IS_PREPARE_RUN ? 'deploy-remote-docker.prepare.log'
+    : IS_MTPROXY_UNDEPLOY_RUN ? 'deploy-remote-docker.mtproxy-undeploy.log'
     : IS_MTPROXY_ONLY_RUN ? 'deploy-remote-docker.mtproxy-only.log'
     : 'deploy-remote-docker.log');
 const logFd = openSync(LOG_FILE, 'w');
@@ -312,6 +314,16 @@ const config = makeConfig({
         default: (getenv('MTPROXY_UPDATE') || '').toLowerCase() === 'true',
         description: 'Recreate ONLY the mtproxy container to apply a new image/config. Safe with --mtproxy-only; hive-mind is never touched.',
       })
+      .option('mtproxy-undeploy', {
+        type: 'boolean',
+        default: false,
+        description: 'Remove ONLY the MTProxy runtime on the server: stop/remove its container, disable and remove its MSS unit/rules. Keeps the secret/config so redeploy reuses the same Telegram link; no reboot, backup, or hive-mind change.',
+      })
+      .option('mtproxy-undeploy-temporary', {
+        type: 'boolean',
+        default: false,
+        description: 'Temporarily stop ONLY MTProxy on the server: stop its container and disable its MSS unit/rules, keeping the container, config, secret, and image for a later --mtproxy-only start. No reboot, backup, or hive-mind change.',
+      })
       .option('mtproxy-engine', {
         choices: ['classic', 'mtg'],
         default: getenv('MTPROXY_ENGINE') || 'classic',
@@ -493,6 +505,9 @@ const VERBOSE = config.verbose;
 const SHOW_SECRETS = config.dangerouslyShowSecrets;
 const MTPROXY_ONLY = config.mtproxyOnly === true;
 if (MTPROXY_ONLY) config.mtproxy = true;
+const MTPROXY_UNDEPLOY = config.mtproxyUndeploy === true;
+const MTPROXY_UNDEPLOY_TEMPORARY = config.mtproxyUndeployTemporary === true;
+const MTPROXY_REMOVE = MTPROXY_UNDEPLOY || MTPROXY_UNDEPLOY_TEMPORARY;
 const MTPROXY_ENGINE = String(config.mtproxyEngine || 'classic').toLowerCase();
 const MTPROXY_PORT = String(config.mtproxyPort || '443').trim();
 const MTPROXY_CONTAINER = MTPROXY_ENGINE === 'classic' ? `mtproxy-classic-${MTPROXY_PORT}` : 'mtproxy';
@@ -844,6 +859,28 @@ const PREPARE = config.prepare;
 if (BACKUP_ONLY && SKIP_BACKUP) {
   console.error('>>> ERROR: --backup-only and --skip-backup are mutually exclusive (backup-only would have nothing to do).');
   process.exit(1);
+}
+// Proxy removal is a dedicated maintenance path. Reject any flag that would
+// turn it into a full deploy, reboot, backup, or cleanup run.
+if (MTPROXY_UNDEPLOY && MTPROXY_UNDEPLOY_TEMPORARY) {
+  console.error('>>> ERROR: --mtproxy-undeploy and --mtproxy-undeploy-temporary are mutually exclusive.');
+  process.exit(1);
+}
+if (MTPROXY_REMOVE) {
+  const conflicts = [];
+  if (MTPROXY_ONLY) conflicts.push('--mtproxy-only');
+  if (config.mtproxyUpdate) conflicts.push('--mtproxy-update');
+  if (config.verifyMtproxy) conflicts.push('--verify-mtproxy');
+  if (config.resetDocker) conflicts.push('--reset-docker');
+  if (config.verifyReboot) conflicts.push('--verify-reboot');
+  if (PREPARE) conflicts.push('--prepare');
+  if (BACKUP_ONLY) conflicts.push('--backup-only');
+  if (config.cleanTempArchives !== 'off') conflicts.push(`--clean-temp-archives=${config.cleanTempArchives}`);
+  if (conflicts.length) {
+    console.error(`>>> ERROR: --mtproxy-undeploy${MTPROXY_UNDEPLOY_TEMPORARY ? '-temporary' : ''} cannot be combined with: ${conflicts.join(', ')}.`);
+    console.error('>>>        It is a dedicated proxy-removal mode: no deploy, reboot, backup, or cleanup.');
+    process.exit(1);
+  }
 }
 // --mtproxy-only is explicitly the non-destructive append path. Reject flags
 // that would reboot the box, wipe Docker state, or run a different maintenance
@@ -1738,8 +1775,13 @@ const nextStep = (msg) => {
 // provisioning and the real hive-mind deploy. Nothing here may stop, restart,
 // prune, or overwrite the existing deployment.
 const MTPROXY_ONLY_REMOTE_DIR = '/root/.hive-mtproxy-only';
-const runMtproxyOnly = async () => {
-  nextStep('MTProxy-only: preflight (must not disturb the running deployment)');
+const MTPROXY_UNDEPLOY_REMOTE_DIR = '/root/.hive-mtproxy-undeploy';
+
+// Shared by the append-only and removal paths: verify the box is already
+// deployed without installing or changing anything, and confirm no other
+// deploy-docker.mjs is racing us. `modeFlag` keeps the error text actionable.
+const mtproxyMaintenancePreflight = async (modeFlag) => {
+  nextStep(`${modeFlag}: preflight (must not disturb the running deployment)`);
 
   // Never interfere with an in-flight deploy: abort instead of killing it.
   const inProgress = await ssh("pgrep -af 'node .*deploy-docker\\.mjs' || true", { silent: true, ignoreErrors: true });
@@ -1747,25 +1789,25 @@ const runMtproxyOnly = async () => {
   if (runningDeploys.length) {
     console.error('>>> ERROR: A deploy-docker.mjs process is already running on the server:');
     for (const line of runningDeploys) console.error(`>>>        ${line}`);
-    console.error('>>>        Refusing to interfere. Wait for it to finish, or re-run with --mtproxy-only later.');
+    console.error(`>>>        Refusing to interfere. Wait for it to finish, or re-run with ${modeFlag} later.`);
     process.exit(1);
   }
   ok('No deploy-docker.mjs is running');
 
-  // Do NOT install Docker/Node in this mode: that changes the host and is not
+  // Do NOT install Docker/Node in these modes: that changes the host and is not
   // needed on an already-deployed box. Fail with a clear hint instead.
   if (!(await dockerDaemonUp())) {
     console.error('>>> ERROR: Docker is not running on the server.');
-    console.error('>>>        --mtproxy-only never installs or starts Docker (that could disturb the bot).');
-    console.error('>>>        Run the normal deploy once, then retry --mtproxy-only.');
+    console.error(`>>>        ${modeFlag} never installs or starts Docker (that could disturb the bot).`);
+    console.error(`>>>        Run the normal deploy once, then retry ${modeFlag}.`);
     process.exit(1);
   }
   ok('Docker daemon is already running');
   const nodeCheck = await ssh('node --version && npm --version', { silent: true, ignoreErrors: true });
   if (nodeCheck?.code !== 0) {
     console.error('>>> ERROR: Node.js/npm is not available on the server.');
-    console.error('>>>        --mtproxy-only never installs them (that could disturb the bot).');
-    console.error('>>>        Run the normal deploy once, then retry --mtproxy-only.');
+    console.error(`>>>        ${modeFlag} never installs them (that could disturb the bot).`);
+    console.error(`>>>        Run the normal deploy once, then retry ${modeFlag}.`);
     process.exit(1);
   }
   ok(`Node.js/npm available (${(nodeCheck.stdout || '').trim().split('\n').join(', ')})`);
@@ -1774,6 +1816,10 @@ const runMtproxyOnly = async () => {
   const botStatus = (await ssh(`docker inspect -f '{{.State.Status}}' hive-mind 2>/dev/null || echo missing`, { silent: true, ignoreErrors: true }))?.stdout?.trim() || 'missing';
   if (botStatus === 'running') ok('hive-mind is running — it will not be touched');
   else warn(`hive-mind status is "${botStatus}" — this run will not change it either way`);
+};
+
+const runMtproxyOnly = async () => {
+  await mtproxyMaintenancePreflight('--mtproxy-only');
 
   // Idempotent: if the proxy is already up and neither an explicit update nor
   // verification was requested, do nothing at all (no pull, no rm, no restart,
@@ -1826,6 +1872,52 @@ const runMtproxyOnly = async () => {
   ok(`${MTPROXY_CONTAINER} is running; hive-mind was never stopped, restarted, or modified`);
 };
 
+// Stop (temporary) or remove (permanent) ONLY the proxy runtime. This reuses
+// the same isolated staging pattern as --mtproxy-only: the script and .lenv are
+// copied to a root-only temp dir, executed, and deleted. It never touches the
+// bot or any other container.
+const runMtproxyUndeploy = async () => {
+  const temporary = MTPROXY_UNDEPLOY_TEMPORARY;
+  const modeFlag = temporary ? '--mtproxy-undeploy-temporary' : '--mtproxy-undeploy';
+  await mtproxyMaintenancePreflight(modeFlag);
+
+  const before = (await ssh(`docker inspect -f '{{.State.Status}}' ${MTPROXY_CONTAINER} 2>/dev/null || echo missing`, { silent: true, ignoreErrors: true }))?.stdout?.trim() || 'missing';
+  note(`${MTPROXY_CONTAINER} before ${modeFlag}: ${before}`);
+
+  nextStep(`${modeFlag}: ${temporary ? 'stopping' : 'removing'} the proxy container and MSS hook`);
+  note(`Using isolated staging dir ${MTPROXY_UNDEPLOY_REMOTE_DIR} (root-only; removed afterwards)`);
+  const innerFlags = [
+    modeFlag,
+    `--mtproxy-engine ${MTPROXY_ENGINE}`,
+    `--mtproxy-port ${MTPROXY_PORT}`,
+    config.mtproxyMss ? `--mtproxy-mss ${JSON.stringify(config.mtproxyMss)}` : '',
+    config.mtproxyWorkers ? `--mtproxy-workers ${JSON.stringify(config.mtproxyWorkers)}` : '',
+  ].filter(Boolean).join(' ');
+  try {
+    await ssh(`rm -rf ${MTPROXY_UNDEPLOY_REMOTE_DIR} && mkdir -p ${MTPROXY_UNDEPLOY_REMOTE_DIR} && chmod 700 ${MTPROXY_UNDEPLOY_REMOTE_DIR}`, { silent: true });
+    await scp(resolve(__dirname, 'deploy-docker.mjs'), `${MTPROXY_UNDEPLOY_REMOTE_DIR}/deploy-docker.mjs`);
+    await scp(resolve(__dirname, '.lenv'), `${MTPROXY_UNDEPLOY_REMOTE_DIR}/.lenv`);
+    await ssh(`chmod 600 ${MTPROXY_UNDEPLOY_REMOTE_DIR}/.lenv && chmod +x ${MTPROXY_UNDEPLOY_REMOTE_DIR}/deploy-docker.mjs`, { silent: true });
+    await sshTTY(`cd ${MTPROXY_UNDEPLOY_REMOTE_DIR} && exec node deploy-docker.mjs ${innerFlags}`);
+  } finally {
+    await ssh(`rm -rf ${MTPROXY_UNDEPLOY_REMOTE_DIR}`, { silent: true, ignoreErrors: true });
+  }
+
+  const after = (await ssh(`docker inspect -f '{{.State.Status}}' ${MTPROXY_CONTAINER} 2>/dev/null || echo missing`, { silent: true, ignoreErrors: true }))?.stdout?.trim() || 'missing';
+  if (temporary && after === 'running') {
+    console.error(`>>> ERROR: ${MTPROXY_CONTAINER} is still running after the temporary undeploy.`);
+    process.exit(1);
+  }
+  if (!temporary && after !== 'missing') {
+    console.error(`>>> ERROR: ${MTPROXY_CONTAINER} still exists after the undeploy (status: ${after}).`);
+    process.exit(1);
+  }
+  ok(temporary
+    ? `${MTPROXY_CONTAINER} stopped (${after}); container, config, secret, and image preserved for --mtproxy-only`
+    : `${MTPROXY_CONTAINER} removed (${after}); config/secret preserved for a stable-link redeploy`);
+  ok('hive-mind and all other containers were never stopped, restarted, or modified');
+};
+
 // Wrapped in try/catch so failures route to fatal() (full untruncated output +
 // log path as the last line) rather than Node's default truncating handler.
 try {
@@ -1869,6 +1961,14 @@ for (;;) {
   await sleep(10000);
 }
 ok(`Server ${USER}@${IP} is reachable`);
+
+// Proxy-removal exit: skip the OS gate, reboot, readiness gate, backup/cleanup,
+// Docker/Node provisioning, deploy-file copy, and the hive-mind deploy itself.
+if (MTPROXY_REMOVE) {
+  await runMtproxyUndeploy();
+  console.log(`\n>>> ✅ MTProxy ${MTPROXY_UNDEPLOY_TEMPORARY ? 'temporary undeploy' : 'undeploy'} complete in ${fmtDuration(Date.now() - scriptStartedAt)} total. hive-mind was left untouched.`);
+  process.exit(0);
+}
 
 // Append-only exit: skip the OS gate, reboot, readiness gate, backup/cleanup,
 // Docker/Node provisioning, deploy-file copy, and the hive-mind deploy itself.
