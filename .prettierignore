@@ -12,3 +12,6 @@ dev/log/
 
 # Operational tooling is maintained separately from the template
 src/hive-control-center/
+
+# Verbatim archived snapshots
+src/archive/
