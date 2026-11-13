@@ -59,6 +59,34 @@ const run = (cmd, args, opts = {}) => {
 const startCommand = sh("command -v '$'");
 const STATE = process.env.HOME + '/.hive-mind/state/auto-fix-reports.json';
 const BOT_LOG = process.env.HOME + '/hive-telegram-bot.log';
+// The bot log is hundreds of MB and the sanitizer can spend many minutes on
+// it. The execution logs carry the failure details; the bot log only gives
+// context, so upload a bounded tail instead of the whole file.
+const MAX_BOT_LOG_BYTES = 32 * 1024 ** 2;
+const botLogForUpload = () => {
+  try {
+    const size = fs.statSync(BOT_LOG).size;
+    if (size <= MAX_BOT_LOG_BYTES) return { file: BOT_LOG, tail: false };
+    const buffer = Buffer.alloc(MAX_BOT_LOG_BYTES);
+    const fd = fs.openSync(BOT_LOG, 'r');
+    let read = 0;
+    try {
+      while (read < MAX_BOT_LOG_BYTES) {
+        const n = fs.readSync(fd, buffer, read, MAX_BOT_LOG_BYTES - read, size - MAX_BOT_LOG_BYTES + read);
+        if (!n) break;
+        read += n;
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'af-bot-log-'));
+    const file = path.join(dir, 'tail.log');
+    fs.writeFileSync(file, buffer.subarray(0, read), { mode: 0o600 });
+    return { file, tail: true };
+  } catch {
+    return { file: BOT_LOG, tail: false };
+  }
+};
 const readState = () => {
   try {
     return JSON.parse(fs.readFileSync(STATE, 'utf8'));
@@ -100,6 +128,10 @@ const containers = execFileSync('docker', ['ps', '-a', '--format', '{"Names":{{j
 const familyRoot = (e) => e.options?.sessionNameHistory?.[0] || e.options?.sessionName;
 const family = (e) => containers.filter((c) => c.Names === familyRoot(e) || c.Names.startsWith(familyRoot(e) + '-resume-'));
 const processes = execFileSync('ps', ['-eo', 'args'], { encoding: 'utf8' }).split('\n');
+// A paused task is deliberately held, not dead: its container still exists and
+// will run again on unpause, so reporting and cleanup must leave it alone.
+const ACTIVE_STATES = new Set(['running', 'paused', 'restarting']);
+const isActiveContainer = (c) => ACTIVE_STATES.has(c.State);
 
 // One entry per attempt: `attemptHistory` holds the earlier attempts of a
 // resumed execution; the current one is the record itself.
@@ -154,15 +186,19 @@ if (PARAMS.mode === 'candidates') {
     if (e.options?.isolated !== 'docker' || e.options?.isolationMode !== 'detached') continue;
     const members = family(e);
     const lost = e.status === 'executing'
-      && !members.some((c) => c.State === 'running')
+      && !members.some(isActiveContainer)
       && !processes.some((p) => p.includes('--resume ' + e.uuid) || (p.includes('docker logs -f') && p.includes(familyRoot(e))))
       && Date.now() - (Date.parse(e.startTime || '') || 0) > 10 * 60000;
     const attempts = attemptsOf(e);
     for (const a of attempts) {
       const isCurrent = a === attempts[attempts.length - 1];
+      // A paused (or still running) task is held on purpose: an old attempt's
+      // finishedAt must not turn its active container into a dead report.
+      const own = members.find((c) => c.Names === (a.sessionName || e.options?.sessionName));
+      if (own && isActiveContainer(own)) continue;
       const finished = Date.parse(a.finishedAt || '') || (lost && isCurrent ? Date.now() : 0);
       // A dead container left on disk is reported whenever it is found.
-      const kept = members.some((c) => c.Names === (a.sessionName || e.options?.sessionName) && c.State !== 'running');
+      const kept = members.some((c) => c.Names === (a.sessionName || e.options?.sessionName) && !isActiveContainer(c));
       if (finished < PARAMS.sinceMs && !kept) continue;
       const reason = reasonOf(e, a, lost && isCurrent);
       if (!reason) continue;
@@ -207,7 +243,7 @@ if (PARAMS.mode === 'candidates') {
   for (const e of executions) {
     if (e.options?.isolated !== 'docker' || e.options?.isolationMode !== 'detached' || e.status === 'executing') continue;
     const members = family(e);
-    if (!members.length || members.some((c) => c.State === 'running')) continue;
+    if (!members.length || members.some(isActiveContainer)) continue;
     const attempts = attemptsOf(e);
     const last = attempts[attempts.length - 1];
     if (!last || last.exitCode === 0 || last.exitCode === null || last.exitCode === undefined) continue;
@@ -366,7 +402,8 @@ if (PARAMS.mode === 'candidates') {
       let dir = path.dirname(fs.realpathSync(sh('command -v hive-telegram-bot')));
       while (dir !== '/' && !(fs.existsSync(dir + '/package.json') && JSON.parse(fs.readFileSync(dir + '/package.json', 'utf8')).name === '@link-assistant/hive-mind')) dir = path.dirname(dir);
       const { uploadLogWithGhUploadLog } = await import(dir + '/src/log-upload.lib.mjs');
-      const result = await uploadLogWithGhUploadLog({ logFile: BOT_LOG, isPublic: !!PARAMS.publicLogs, description: 'hive-telegram-bot log (auto-fix collect)' });
+      const uploadable = botLogForUpload();
+      const result = await uploadLogWithGhUploadLog({ logFile: uploadable.file, isPublic: !!PARAMS.publicLogs, description: `hive-telegram-bot log${uploadable.tail ? ' tail' : ''} (auto-fix collect)` });
       botLog = result?.success ? result.url : 'upload failed';
     } catch (error) {
       botLog = 'upload failed: ' + (error.message || String(error)).split('\n')[0];
@@ -662,6 +699,7 @@ const installedReleasedAt = () => {
 };
 
 let botLogUrl;
+const botLog = botLogForUpload();
 for (const [signature, items] of [...groups].slice(0, PARAMS.maxReports)) {
   try {
     let target = null;
@@ -683,7 +721,7 @@ for (const [signature, items] of [...groups].slice(0, PARAMS.maxReports)) {
       const open = ghJson('issue', 'list', '-R', PARAMS.repo, '--state', 'open', '--search', `in:title "${title}"`, '--json', 'number,title');
       target = (open || []).find((i) => i.title === title)?.number || null;
     }
-    if (botLogUrl === undefined) botLogUrl = await upload(BOT_LOG, 'hive-telegram-bot log (auto-fix report)');
+    if (botLogUrl === undefined) botLogUrl = await upload(botLog.file, `hive-telegram-bot log${botLog.tail ? ' tail' : ''} (auto-fix report)`);
     const sections = [];
     for (const { ev, a } of items) {
       const log = await upload(ev.logPath, `${ev.url || ev.sessionName} execution ${ev.uuid} (auto-fix report)`, ev.uuid);

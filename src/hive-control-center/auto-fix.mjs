@@ -779,6 +779,75 @@ const containerModule = async (source, params = {}) => {
   return JSON.parse(line.slice('AF_JSON:'.length));
 };
 
+// Long container modules (reporting uploads many logs) must survive an SSH
+// connection dropped by the server's brute-force protection. Start one
+// detached with nohup, then poll its result over short connections.
+const containerModuleDetached = async (
+  source,
+  params = {},
+  { timeoutMs = 30 * 60000, pollMs = 5000 } = {}
+) => {
+  const code = `const PARAMS = ${JSON.stringify(params)};\n${source}`;
+  const id = `af-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const dir = `/tmp/${id}`;
+  const file = `${dir}/module.mjs`;
+  const out = `${dir}/out.log`;
+  const exit = `${dir}/exit`;
+  const start = [
+    `mkdir -p ${dir}`,
+    `chmod 700 ${dir}`,
+    `echo ${b64(code)} | base64 -d > ${file}`,
+    `chmod 600 ${file}`,
+    `nohup sh -c 'node ${file} > ${out} 2>&1; echo $? > ${exit}' >/dev/null 2>&1 &`,
+  ].join(' && ');
+  await ssh(
+    `docker exec -d ${CONTAINER} bash -lc 'echo ${b64(start)} | base64 -d | bash'`,
+    { silent: true }
+  );
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const poll = [
+      `if [ -f ${exit} ]; then`,
+      'echo __DONE__',
+      `cat ${exit}`,
+      `cat ${out}`,
+      'else',
+      'echo __RUNNING__',
+      `tail -c 2000 ${out} 2>/dev/null`,
+      'fi',
+    ].join('\n');
+    const result = await ssh(
+      `docker exec ${CONTAINER} bash -lc 'echo ${b64(poll)} | base64 -d | bash'`,
+      { silent: true, ignoreErrors: true, retries: 1 }
+    );
+    const text = result.stdout || '';
+    if (text.includes('__DONE__')) {
+      const body = text
+        .slice(text.indexOf('__DONE__') + '__DONE__'.length)
+        .trim();
+      const [exitText, ...lines] = body.split('\n');
+      const output = lines.join('\n');
+      const line = output.split('\n').find((l) => l.startsWith('AF_JSON:'));
+      await ssh(`docker exec ${CONTAINER} rm -rf ${dir}`, {
+        silent: true,
+        ignoreErrors: true,
+      });
+      if (!line) {
+        throw new Error(
+          `No result from detached container module (exit ${exitText}): ${output.slice(-500)}`
+        );
+      }
+      return JSON.parse(line.slice('AF_JSON:'.length));
+    }
+    if (Date.now() > deadline) {
+      throw new Error(
+        `Detached container module timed out after ${timeoutMs / 1000}s: ${(result.stdout || '').slice(-500)}`
+      );
+    }
+    await sleep(pollMs);
+  }
+};
+
 // Run an ES module on the host with the host's Node.js, as the SSH user (root):
 // for what only the host sees (journal, snapshots, other containers' layers).
 const hostModule = async (source, params = {}) => {
@@ -1142,7 +1211,7 @@ const reportDeadTasks = async () => {
     `docker cp /root/auto-fix/facts.json ${CONTAINER}:/tmp/auto-fix-facts.json && docker exec -u 0 ${CONTAINER} chmod 644 /tmp/auto-fix-facts.json`,
     { silent: true }
   );
-  const { results, errors } = await containerModule(REPORT_MODULE, {
+  const { results, errors } = await containerModuleDetached(REPORT_MODULE, {
     mode: 'report',
     events,
     factsPath: '/tmp/auto-fix-facts.json',
@@ -1306,7 +1375,7 @@ if (config.cleanupAllFailed) {
     },
     targets: selection.targets,
   };
-  const result = await containerModule(HIVE_CLEANUP_MODULE, {
+  const result = await containerModuleDetached(HIVE_CLEANUP_MODULE, {
     manifest,
     guardSource: HIVE_CLEANUP_GUARD_SOURCE,
     liveSelection: true,
@@ -1403,7 +1472,7 @@ if (config.cleanupFailed) {
   nextStep(
     `Running hive-cleanup for those containers only${config.dryRun ? ' (dry run)' : ''}`
   );
-  const result = await containerModule(HIVE_CLEANUP_MODULE, {
+  const result = await containerModuleDetached(HIVE_CLEANUP_MODULE, {
     manifest,
     guardSource: HIVE_CLEANUP_GUARD_SOURCE,
     backupVerified: backup.verified,
