@@ -30,9 +30,11 @@ TELEGRAM_ENV_FILE=/path/to/telegram.env ./diagnose-mtproxy.mjs --api-test --medi
 TELEGRAM_ENV_FILE=/path/to/telegram.env ./diagnose-mtproxy.mjs --api-media --media-seconds 0
 node scripts/mtproxy/proxy-matrix.mjs --list
 TELEGRAM_ENV_FILE=/path/to/telegram.env node scripts/mtproxy/proxy-matrix.mjs
+node auto-fix.mjs --disk-report
 ```
 
-Diagnostics are written to `data/diagnostics/` by default. Do not commit
+Diagnostics are written to `data/diagnostics/` by default; the disk report is
+written to `data/disk-usage-*.json`. Do not commit
 `.lenv`, logs, captures, generated data, or server snapshots.
 
 ## Security

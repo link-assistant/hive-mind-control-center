@@ -178,6 +178,7 @@
 //   task that still has a running container (no preservation backup):
 //     ./auto-fix.mjs --cleanup-all-failed   (add --dry-run to preview)
 //   Diagnose resource use, change nothing: ./auto-fix.mjs --diagnose
+//   Report where disk space is used, change nothing: ./auto-fix.mjs --disk-report
 //   Only the stuck upload check (gh-upload-log/sanitizer; report only):
 //     ./auto-fix.mjs --check-uploads
 //   Kill uploads confirmed stuck (no file progress, a core for 30+ min):
@@ -471,6 +472,12 @@ const config = makeConfig({
         default: 15,
         description: 'Sample window of --diagnose',
       })
+      .option('disk-report', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Only report where disk space is used (read-only): filesystem/inodes, Docker images, containers, volumes and build cache, container layers and logs, selected host directories; nothing else runs',
+      })
       .option('global-tools-only', {
         type: 'boolean',
         default: false,
@@ -573,6 +580,7 @@ const config = makeConfig({
     'collect-matching',
     'diagnose',
     'diagnose-seconds',
+    'disk-report',
     'check-tasks',
     'global-tools-only',
     'fix-global-tools',
@@ -819,6 +827,7 @@ const HOST_FACTS_MODULE = readModule('host-facts.mjs');
 const DISK_CLEAN_MODULE = readModule('disk-clean.mjs');
 const CPU_MODULE = readModule('cpu.mjs');
 const DIAGNOSE_MODULE = readModule('diagnose.mjs');
+const DISK_USAGE_MODULE = readModule('disk-usage.mjs');
 const TASKS_MODULE = readModule('tasks.mjs');
 const STUCK_UPLOADS_MODULE = readModule('stuck-uploads.mjs');
 const DEPENDENCIES_MODULE = readModule('dependencies.mjs');
@@ -1534,6 +1543,21 @@ if (config.checkUploads) {
     process.exit(2);
   if (result.act && result.killed.some((k) => k.action.startsWith('could not')))
     process.exit(1);
+  process.exit(0);
+}
+
+// --disk-report: where disk space is used; nothing else runs.
+if (config.diskReport) {
+  nextStep('Reporting disk usage (read-only)');
+  const result = await hostModule(DISK_USAGE_MODULE, {
+    top: 10,
+    timeoutS: 180,
+  });
+  for (const line of result.report || []) console.log(line);
+  fs.mkdirSync('data', { recursive: true });
+  const file = `data/disk-usage-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+  fs.writeFileSync(file, JSON.stringify(result, null, 2) + '\n');
+  console.log(`>>> Disk usage report written to ${file}`);
   process.exit(0);
 }
 
