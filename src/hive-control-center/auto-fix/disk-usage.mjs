@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 
 const TOP = Math.max(1, Number(PARAMS.top) || 10);
 const TIMEOUT = Math.max(10, Number(PARAMS.timeoutS) || 120);
+const CONTAINERS_ONLY = Boolean(PARAMS.containersOnly);
 
 const run = (cmd, args, opts = {}) => {
   const r = spawnSync(cmd, args, {
@@ -196,6 +197,26 @@ const ctrUsage = (id) => {
   return size ? parseSize(size[0]) : null;
 };
 
+const githubTaskUrl = (cmd) => {
+  const text = Array.isArray(cmd) ? cmd.join(' ') : String(cmd || '');
+  const urls =
+    text.match(
+      /https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/(?:issues|pull)\/\d+)?/g
+    ) || [];
+  return (
+    urls.find((url) => /\/(?:issues|pull)\/\d+$/.test(url)) || urls[0] || ''
+  );
+};
+
+const containerConfig = (name) => {
+  const r = run('docker', ['inspect', '-f', '{{json .Config}}', name]);
+  try {
+    return JSON.parse(r.out) || {};
+  } catch {
+    return {};
+  }
+};
+
 const containers = () => {
   const r = run('docker', [
     'ps',
@@ -214,6 +235,18 @@ const containers = () => {
       name,
     ]);
     const [state, logPath] = inspect.out.split('\t');
+    const config = containerConfig(name);
+    const labels = config.Labels || {};
+    const env = {};
+    for (const item of config.Env || []) {
+      const at = item.indexOf('=');
+      if (at !== -1) env[item.slice(0, at)] = item.slice(at + 1);
+    }
+    const execution =
+      labels['start-command.uuid'] || env.START_EXECUTION_ID || '';
+    const session =
+      labels['start-command.session'] || env.START_SESSION_NAME || '';
+    const taskUrl = execution ? githubTaskUrl(config.Cmd) : '';
     let layerBytes = ctrUsage(id);
     if (layerBytes === null) {
       const fallback = run('docker', [
@@ -234,6 +267,9 @@ const containers = () => {
       layerBytes,
       logPath,
       logBytes: statBytes(logPath),
+      execution,
+      session,
+      taskUrl,
     });
   }
   return list;
@@ -343,27 +379,30 @@ const system = dockerSystem();
 stage('containers');
 const containerList = containers();
 stage('images');
-const imageList = images();
+const imageList = CONTAINERS_ONLY ? [] : images();
 stage('volumes');
-const volumeList = volumes();
+const volumeList = CONTAINERS_ONLY ? [] : volumes();
 stage('host-directories');
-const dirs = hostDirs();
+const dirs = CONTAINERS_ONLY ? [] : hostDirs();
 stage('journal');
-const journal = run('journalctl', ['--disk-usage']).out.replace(
-  /^.*take up /,
-  ''
-);
+const journal = CONTAINERS_ONLY
+  ? ''
+  : run('journalctl', ['--disk-usage']).out.replace(/^.*take up /, '');
 
 const contributors = [
   ...containerList.map((c) => ({
     kind: 'container layer',
     name: c.name,
     bytes: c.layerBytes,
+    execution: c.execution,
+    taskUrl: c.taskUrl,
   })),
   ...containerList.map((c) => ({
     kind: 'container log',
     name: c.name,
     bytes: c.logBytes,
+    execution: c.execution,
+    taskUrl: c.taskUrl,
   })),
   ...imageList.map((i) => ({
     kind: 'image',
@@ -400,60 +439,71 @@ report.push(
   `Docker reported: ${gib(dockerBytes)}; not represented in Docker totals (host files and Docker storage overhead): about ${gib(Math.max(0, df.used - dockerBytes))}`
 );
 report.push('');
-report.push(`Container writable layers and logs (largest ${TOP}):`);
+report.push(`Container writable layers and logs by task (largest ${TOP}):`);
 for (const item of [...containerList]
   .sort((a, b) => b.layerBytes + b.logBytes - (a.layerBytes + a.logBytes))
   .slice(0, TOP)) {
+  const task = [item.execution ? `$ ${item.execution}` : '', item.taskUrl]
+    .filter(Boolean)
+    .join('  ');
   report.push(
-    `  ${gib(item.layerBytes + item.logBytes).padStart(9)}  layer ${gib(item.layerBytes).padStart(9)}, log ${gib(item.logBytes).padStart(9)}  ${item.state}  ${item.name}`
+    `  ${gib(item.layerBytes + item.logBytes).padStart(9)}  layer ${gib(item.layerBytes).padStart(9)}, log ${gib(item.logBytes).padStart(9)}  ${item.state.padEnd(8)}  ${item.name}${task ? `  ${task}` : ''}`
   );
 }
 if (!containerList.length) report.push('  none');
-report.push('');
-report.push(`Images (largest ${TOP}):`);
-for (const item of imageList) {
-  report.push(
-    `  ${gib(item.bytes).padStart(9)}  ${item.tags.join(', ') || item.id.slice(0, 12)}`
-  );
-}
-if (!imageList.length) report.push('  none');
-report.push('');
-report.push(`Volumes (largest ${TOP}):`);
-for (const item of volumeList) {
-  report.push(`  ${gib(item.bytes).padStart(9)}  ${item.name} (${item.mountpoint})`);
-}
-if (!volumeList.length) report.push('  none');
-report.push('');
-report.push('Host directories (outside Docker root):');
-for (const item of dirs) {
-  report.push(`  ${gib(item.bytes).padStart(9)}  ${item.path}`);
-  if (item.bytes >= 2 ** 30) {
-    for (const child of item.children.slice(0, 5)) {
-      report.push(`    ${gib(child.bytes).padStart(9)}  ${child.path}`);
-      if (child.bytes >= 2 ** 30) {
-        for (const grandchild of item.grandchildren
-          .filter((row) => row.path.startsWith(`${child.path}/`))
-          .slice(0, 3)) {
-          report.push(
-            `      ${gib(grandchild.bytes).padStart(9)}  ${grandchild.path}`
-          );
+if (!CONTAINERS_ONLY) {
+  report.push('');
+  report.push(`Images (largest ${TOP}):`);
+  for (const item of imageList) {
+    report.push(
+      `  ${gib(item.bytes).padStart(9)}  ${item.tags.join(', ') || item.id.slice(0, 12)}`
+    );
+  }
+  if (!imageList.length) report.push('  none');
+  report.push('');
+  report.push(`Volumes (largest ${TOP}):`);
+  for (const item of volumeList) {
+    report.push(
+      `  ${gib(item.bytes).padStart(9)}  ${item.name} (${item.mountpoint})`
+    );
+  }
+  if (!volumeList.length) report.push('  none');
+  report.push('');
+  report.push('Host directories (outside Docker root):');
+  for (const item of dirs) {
+    report.push(`  ${gib(item.bytes).padStart(9)}  ${item.path}`);
+    if (item.bytes >= 2 ** 30) {
+      for (const child of item.children.slice(0, 5)) {
+        report.push(`    ${gib(child.bytes).padStart(9)}  ${child.path}`);
+        if (child.bytes >= 2 ** 30) {
+          for (const grandchild of item.grandchildren
+            .filter((row) => row.path.startsWith(`${child.path}/`))
+            .slice(0, 3)) {
+            report.push(
+              `      ${gib(grandchild.bytes).padStart(9)}  ${grandchild.path}`
+            );
+          }
         }
       }
     }
   }
+  report.push(`Journal: ${journal || 'unknown'}`);
 }
-report.push(`Journal: ${journal || 'unknown'}`);
 report.push('');
 report.push(`Largest single contributors:`);
 for (const item of contributors.slice(0, TOP)) {
+  const task = [item.execution ? `$ ${item.execution}` : '', item.taskUrl]
+    .filter(Boolean)
+    .join('  ');
   report.push(
-    `  ${gib(item.bytes).padStart(9)}  ${item.kind}  ${item.name}`
+    `  ${gib(item.bytes).padStart(9)}  ${item.kind}  ${item.name}${task ? `  ${task}` : ''}`
   );
 }
 
 const result = {
   schema: 'auto-fix-disk-usage-v1',
   generatedAt: new Date().toISOString(),
+  mode: CONTAINERS_ONLY ? 'containers' : 'full',
   filesystem: df,
   dockerRoot: root,
   dockerSystem: system.rows,

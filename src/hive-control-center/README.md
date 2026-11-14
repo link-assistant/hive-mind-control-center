@@ -33,6 +33,11 @@ TELEGRAM_ENV_FILE=/path/to/telegram.env node scripts/mtproxy/proxy-matrix.mjs
 node auto-fix.mjs --disk-report
 ```
 
+Normal auto-fix runs print container disk use by task, including the container,
+its `start-command` execution UUID and the GitHub issue or pull request. The
+`--disk-report` mode adds images, volumes and host directories and writes
+`data/disk-usage-*.json`.
+
 Diagnostics are written to `data/diagnostics/` by default; the disk report is
 written to `data/disk-usage-*.json`. Do not commit
 `.lenv`, logs, captures, generated data, or server snapshots.

@@ -1920,6 +1920,18 @@ open(p,"w").write(json.dumps(d,indent=2)+"\\n")' && systemctl reload docker && s
   );
 }
 
+console.log('--- Disk usage by task (read-only)');
+try {
+  const disk = await hostModule(DISK_USAGE_MODULE, {
+    top: 10,
+    timeoutS: 120,
+    containersOnly: true,
+  });
+  for (const line of disk.report || []) console.log(line);
+} catch (error) {
+  console.log(`>>> Could not report disk usage by task: ${error.message}`);
+}
+
 nextStep('Container states');
 await ssh(`docker ps -a --format '{{.Names}}\\t{{.Status}}\\t{{.Image}}'`);
 
