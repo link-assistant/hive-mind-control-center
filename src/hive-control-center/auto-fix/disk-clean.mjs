@@ -123,15 +123,22 @@ const freeableBytes = (p) => run('find', [p, '-type', 'f', '-links', '1', '-prin
 const sanePath = (p) => typeof p === 'string' && p.startsWith('/') && !p.includes('\0') && !/(^|\/)\.\.(\/|$)/.test(p)
   && p.split('/').filter(Boolean).length >= 2 && !/^\/(proc|sys|dev|run|etc|bin|sbin|lib|lib64|usr\/bin|boot)(\/|$)/.test(p);
 
-for (const name of run('docker', ['ps', '--format', '{{.Names}}']).out.split('\n').filter(Boolean)) {
+for (const line of run('docker', ['ps', '--format', '{{.Names}}\t{{.State}}']).out.split('\n').filter(Boolean)) {
+  const [name, state] = line.split('\t');
   const entry = { name, candidates: 0, deleted: 0, bytes: 0, error: null };
   summary.containers.push(entry);
+  // `docker ps` also lists paused containers, but `docker exec` cannot enter
+  // them; skip them instead of reporting a misleading "no node in container".
+  if (state !== 'running') {
+    entry.error = `not running (${state}); skipped`;
+    continue;
+  }
   const id = run('docker', ['inspect', '-f', '{{.Id}}', name]).out;
   const upper = upperOf(id);
   if (!upper || !fs.existsSync(upper)) {
     // A task that finishes during the cleanup is removed by start-command.
-    const state = run('docker', ['inspect', '-f', '{{.State.Status}}', name]);
-    entry.error = state.code !== 0 ? 'finished and removed during the cleanup; skipped' : state.out !== 'running' ? 'stopped during the cleanup (' + state.out + '); skipped' : 'writable layer not found';
+    const currentState = run('docker', ['inspect', '-f', '{{.State.Status}}', name]);
+    entry.error = currentState.code !== 0 ? 'finished and removed during the cleanup; skipped' : currentState.out !== 'running' ? 'stopped during the cleanup (' + currentState.out + '); skipped' : 'writable layer not found';
     continue;
   }
   if (run('docker', ['exec', name, 'sh', '-c', 'command -v node']).code !== 0) {
