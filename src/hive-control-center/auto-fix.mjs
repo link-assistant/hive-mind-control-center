@@ -866,6 +866,70 @@ const hostModule = async (source, params = {}) => {
   return JSON.parse(line.slice('AF_JSON:'.length));
 };
 
+// Long host modules (the disk scan walks many files and containers) must
+// survive a dropped SSH connection. Start one detached with nohup and poll its
+// result over short connections.
+const hostModuleDetached = async (
+  source,
+  params = {},
+  { timeoutMs = 45 * 60000, pollMs = 5000 } = {}
+) => {
+  const code = `const PARAMS = ${JSON.stringify(params)};\n${source}`;
+  const id = `run.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  const dir = `/root/auto-fix/${id}`;
+  const file = `${dir}/module.mjs`;
+  const out = `${dir}/out.log`;
+  const exit = `${dir}/exit`;
+  const start = [
+    'mkdir -p /root/auto-fix',
+    `mkdir -m 700 ${dir}`,
+    `echo ${b64(code)} | base64 -d > ${file}`,
+    `chmod 600 ${file}`,
+    `nohup sh -c 'node ${file} > ${out} 2>&1; echo $? > ${exit}' >/dev/null 2>&1 &`,
+  ].join(' && ');
+  await ssh(start, { silent: true });
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const poll = [
+      `if [ -f ${exit} ]; then`,
+      'echo __DONE__',
+      `cat ${exit}`,
+      `cat ${out}`,
+      'else',
+      'echo __RUNNING__',
+      `tail -c 2000 ${out} 2>/dev/null`,
+      'fi',
+    ].join('\n');
+    const result = await ssh(poll, {
+      silent: true,
+      ignoreErrors: true,
+      retries: 1,
+    });
+    const text = result.stdout || '';
+    if (text.includes('__DONE__')) {
+      const body = text
+        .slice(text.indexOf('__DONE__') + '__DONE__'.length)
+        .trim();
+      const [exitText, ...lines] = body.split('\n');
+      const output = lines.join('\n');
+      const line = output.split('\n').find((l) => l.startsWith('AF_JSON:'));
+      await ssh(`rm -rf ${dir}`, { silent: true, ignoreErrors: true });
+      if (!line) {
+        throw new Error(
+          `No result from detached host module (exit ${exitText}): ${output.slice(-500)}`
+        );
+      }
+      return JSON.parse(line.slice('AF_JSON:'.length));
+    }
+    if (Date.now() > deadline) {
+      throw new Error(
+        `Detached host module timed out after ${timeoutMs / 1000}s: ${(result.stdout || '').slice(-500)}`
+      );
+    }
+    await sleep(pollMs);
+  }
+};
+
 // `not_found` only when Docker says so: an empty answer from a dropped SSH
 // connection must not be read as "the container and its state are gone".
 const getContainerStatus = async () => {
@@ -2281,16 +2345,20 @@ if (config.dssClean) {
     `Safe disk cleanup with disk-space-saviour ${DSS.version}${config.dssDry ? ' (dry run)' : ''}: host, then every running container`
   );
   try {
-    const result = await hostModule(DISK_CLEAN_MODULE, {
-      ...DSS,
-      dry: config.dssDry,
-      hostTimeoutS: 1800,
-      containerTimeoutS: 900,
-      minItemMb: 20,
-      journalKeepDays: config.journalKeepDays,
-      maxDockerdRssMb: 2560,
-      minMemAvailableMb: 1536,
-    });
+    const result = await hostModuleDetached(
+      DISK_CLEAN_MODULE,
+      {
+        ...DSS,
+        dry: config.dssDry,
+        hostTimeoutS: 1800,
+        containerTimeoutS: 900,
+        minItemMb: 20,
+        journalKeepDays: config.journalKeepDays,
+        maxDockerdRssMb: 2560,
+        minMemAvailableMb: 1536,
+      },
+      { timeoutMs: 90 * 60000 }
+    );
     const gib = (bytes) => (bytes / 2 ** 30).toFixed(2) + ' GiB';
     console.log(
       `>>>   host: ${result.host.error ? 'error ' + result.host.error : (config.dssDry ? 'would free ' : 'freed up to ') + gib(result.host.bytes) + ' in ' + result.host.items + ' item(s)'}`
