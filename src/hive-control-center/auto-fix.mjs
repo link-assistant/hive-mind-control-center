@@ -65,7 +65,8 @@
 //      uploaded private: execution logs with `$ --upload-log` (start-command
 //      0.37+ sanitizes them), the bot log with hive-mind's sanitizing
 //      uploader; every body passes hive-mind's fail-closed publication
-//      sanitizer. --report-dry writes previews instead.
+//      sanitizer. --report-dry writes previews instead; --no-report-logs posts
+//      the analysis without uploading any logs.
 //   9. Resumes every killed task container from start-command's execution
 //      store (`$ --list`), which survives everything: `$ --resume <execution>
 //      -- solve <original args> --resume <last tool session id>` commits the
@@ -157,7 +158,8 @@
 // Usage: ./auto-fix.mjs [--verbose] [--since-hours 24] [--wait-minutes 240]
 //        [--poll-seconds 60] [--bot-grace-minutes 10] [--max-resumes 3]
 //        [--no-resume] [--no-cleanup] [--no-repair-records] [--no-follow]
-//        [--no-report] [--report-dry] [--no-report-failed] [--max-reports 5]
+//        [--no-report] [--report-dry] [--no-report-logs] [--no-report-failed]
+//        [--max-reports 5]
 //        [--report-repo link-assistant/hive-mind] [--public-logs]
 //        [--no-dss-clean] [--dss-dry] [--journal-keep-days 3]
 //        [--no-fix-live-restore] [--cpu-hog-percent 90] [--cpu-hog-minutes 30]
@@ -243,6 +245,10 @@ const config = makeConfig({
       .option('server-ip', { default: getenv('SERVER_IP') })
       .option('server-user', { default: getenv('SERVER_USER') })
       .option('server-pass', { default: getenv('SERVER_PASS') })
+      .option('server-jump-host', { default: getenv('JUMP_HOST') })
+      .option('server-jump-user', { default: getenv('JUMP_USER') })
+      .option('server-jump-pass', { default: getenv('JUMP_PASS') })
+      .option('server-jump-port', { default: getenv('JUMP_PORT') })
       .option('since-hours', {
         type: 'number',
         default: 24,
@@ -398,6 +404,12 @@ const config = makeConfig({
         description:
           'Write issue previews on the server instead of uploading logs and posting',
       })
+      .option('report-logs', {
+        type: 'boolean',
+        default: true,
+        description:
+          'Upload sanitized execution and bot logs with reports (--no-report-logs posts the analysis without them)',
+      })
       .option('report-failed', {
         type: 'boolean',
         default: true,
@@ -540,6 +552,10 @@ const config = makeConfig({
     'server-ip',
     'server-user',
     'server-pass',
+    'server-jump-host',
+    'server-jump-user',
+    'server-jump-pass',
+    'server-jump-port',
     'since-hours',
     'wait-minutes',
     'poll-seconds',
@@ -567,6 +583,7 @@ const config = makeConfig({
     'repair-records',
     'report',
     'report-dry',
+    'report-logs',
     'report-failed',
     'report-repo',
     'max-reports',
@@ -688,12 +705,18 @@ const log = (...args) => {
 const IP = config.serverIp;
 const USER = config.serverUser;
 const PASS = config.serverPass;
+const JUMP_HOST = config.serverJumpHost;
+const JUMP_USER = config.serverJumpUser || 'root';
+const JUMP_PASS = config.serverJumpPass;
+const JUMP_PORT = String(config.serverJumpPort || 22);
 const CONTAINER = 'hive-mind';
 
 const missing = [];
 if (!IP) missing.push('SERVER_IP');
 if (!USER) missing.push('SERVER_USER');
 if (!PASS) missing.push('SERVER_PASS');
+if (JUMP_HOST && !JUMP_USER) missing.push('JUMP_USER');
+if (JUMP_HOST && !JUMP_PASS) missing.push('JUMP_PASS');
 if (missing.length) {
   console.error(
     `>>> ERROR: Missing required .lenv values: ${missing.join(', ')}`
@@ -701,10 +724,31 @@ if (missing.length) {
   process.exit(1);
 }
 
+const JUMP_PROXY = decodeURIComponent(
+  new URL('./auto-fix/ssh-jump-proxy.sh', import.meta.url).pathname
+);
+if (JUMP_HOST) {
+  Object.assign(process.env, {
+    SERVER_IP: IP,
+    JUMP_HOST,
+    JUMP_USER,
+    JUMP_PASS,
+    JUMP_PORT,
+  });
+}
+
 // Password login only: PubkeyAuthentication=no keeps ssh from trying (and
-// warning about) local key files.
-const SSH_OPTS =
-  '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR -o PubkeyAuthentication=no';
+// warning about) local key files. With a jump host, the helper authenticates to
+// both hops: the outer sshpass handles SERVER_PASS, the ProxyCommand handles
+// JUMP_PASS, so the two passwords never have to be the same.
+const SSH_OPTS = [
+  '-o StrictHostKeyChecking=no',
+  '-o UserKnownHostsFile=/dev/null',
+  '-o ConnectTimeout=10',
+  '-o LogLevel=ERROR',
+  '-o PubkeyAuthentication=no',
+  ...(JUMP_HOST ? [`-o ProxyCommand=${JUMP_PROXY}`] : []),
+].join(' ');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const b64 = (text) => Buffer.from(text).toString('base64');
@@ -1282,6 +1326,7 @@ const reportDeadTasks = async () => {
     dry: config.reportDry,
     repo: config.reportRepo,
     publicLogs: config.publicLogs,
+    uploadLogs: config.reportLogs,
     maxReports: config.maxReports,
     footer: ISSUE_FOOTER,
   });

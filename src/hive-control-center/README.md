@@ -38,6 +38,11 @@ its `start-command` execution UUID and the GitHub issue or pull request. The
 `--disk-report` mode adds images, volumes and host directories and writes
 `data/disk-usage-*.json`.
 
+If direct SSH to `SERVER_IP` is blocked, set `JUMP_HOST`, `JUMP_USER` and
+`JUMP_PASS` in `.lenv` (optionally `JUMP_PORT`); auto-fix then reaches
+`SERVER_IP` through that host automatically. The jump password is passed to
+`sshpass` through the environment and is never printed.
+
 Diagnostics are written to `data/diagnostics/` by default; the disk report is
 written to `data/disk-usage-*.json`. Do not commit
 `.lenv`, logs, captures, generated data, or server snapshots.

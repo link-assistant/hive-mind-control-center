@@ -3,6 +3,13 @@ SERVER_IP: 0.0.0.0
 SERVER_USER: root
 SERVER_PASS:
 
+# Optional SSH jump host. When JUMP_HOST is set, auto-fix reaches SERVER_IP
+# through it automatically. JUMP_PASS is never printed or committed.
+# JUMP_HOST:
+# JUMP_USER: root
+# JUMP_PASS:
+# JUMP_PORT: 22
+
 # Queue: minimum gap the bot enforces between STARTING successive tasks (per tool),
 # in milliseconds. This is the "interval between tasks". 300000 = 5 minutes.
 # hive-mind env var: HIVE_MIND_MIN_START_INTERVAL_MS (default 600000 = 10 min).

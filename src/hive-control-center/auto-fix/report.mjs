@@ -651,7 +651,7 @@ const reportedOnGitHub = (ev) => {
 
 const uploadedLogs = new Map();
 const upload = async (file, description, uuid = null) => {
-  if (PARAMS.dry || !file || !fs.existsSync(file)) return null;
+  if (PARAMS.dry || PARAMS.uploadLogs === false || !file || !fs.existsSync(file)) return null;
   if (uuid && startUploadSanitizes && !PARAMS.publicLogs) {
     // One log holds every attempt of an execution: uploaded once.
     if (!uploadedLogs.has(uuid)) uploadedLogs.set(uuid, uploadExecutionLog(uuid));
