@@ -6,6 +6,10 @@ This repository publishes the real test package
 `@link-foundation/example-package-name` so the template release pipeline is
 validated end to end with npm trusted publishing.
 
+## Control Center operations
+
+The [Hive Mind Manager migration runbook](docs/hive-manager-migration.md) covers the pinned release, staging, and operator cutover. See the [command inventory and verification record](docs/case-studies/issue-1/README.md) for deployment-specific fallbacks and live acceptance checks.
+
 ## Features
 
 - **Multi-runtime support**: Works with Bun, Node.js, and Deno

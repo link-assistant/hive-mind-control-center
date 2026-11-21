@@ -1,10 +1,14 @@
 # Hive Control Center operational tooling
 
-This directory contains the operational scripts imported from the local
-`hive-control-center` workspace: deployment, diagnostics, recovery, and
-auto-fix tooling for the hive-mind host and its optional MTProto proxy.
+Follow the [Hive Mind Manager migration runbook](../../docs/hive-manager-migration.md)
+for the pinned release and supported deployment, diagnostics, recovery, and
+MTProxy commands. The [inventory](../../docs/case-studies/issue-1/README.md)
+lists release gaps and the live checks required before each caller moves.
 
-## Layout
+## Legacy fallbacks
+
+Keep the command used by the current deployment available until its replacement
+passes the corresponding live checks. The fallback scripts live here.
 
 - `deploy-docker.mjs`: local Docker deployment entry point.
 - `deploy-remote-docker.mjs`: remote deployment over SSH/SFTP.
@@ -18,7 +22,7 @@ auto-fix tooling for the hive-mind host and its optional MTProto proxy.
 - `docs/MTProxy-CONFIG-COVERAGE.md`: every MTProxy/deployment option and its tested status.
 - `.lenv.example`: configuration template; copy it to `.lenv` and fill in values.
 
-## Usage
+## Running the fallbacks
 
 Run these commands from this directory so relative paths resolve:
 

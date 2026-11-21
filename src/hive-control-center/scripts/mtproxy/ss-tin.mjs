@@ -31,7 +31,7 @@ for (const line of lines) {
   if (line.trim() && !/^\s/.test(line)) {
     const fields = line.split(/\s+/);
     const localIndex = /^\d+$/.test(fields[0]) ? 2 : 3;
-    currentMatches = !port || new RegExp(`:${port}$`).test(fields[localIndex] ?? '');
+    currentMatches = !port || (fields[localIndex] ?? '').endsWith(`:${port}`);
     if (currentMatches) connections += 1;
     continue;
   }

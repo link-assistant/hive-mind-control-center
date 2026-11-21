@@ -13,6 +13,7 @@ import {
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { proxySocketRows } from './scripts/mtproxy/netstat.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -520,12 +521,7 @@ if (media.dir) {
 
 section('Local sockets to proxy');
 const socketResult = command('netstat', ['-anv', '-p', 'tcp']);
-const socketLines = socketResult.stdout
-  .split(/\r?\n/)
-  .filter(
-    (line) =>
-      new RegExp(`[.]${options.port}\\s`).test(line) && line.includes(serverIp)
-  );
+const socketLines = proxySocketRows(socketResult.stdout ?? '', serverIp, options.port);
 if (!socketLines.length) {
   note(`no local TCP sockets to ${serverIp}:${options.port}`);
 } else {
