@@ -15,6 +15,8 @@ manager="$HOME/.local/hive-manager-2.45.0/node_modules/.bin/hive-manager"
 
 Expect `2.45.0`. The [release documentation](https://github.com/link-assistant/hive-mind/blob/v2.45.0/docs/deployment/hive-manager.md) describes the commands and authentication. If Docker or Telegram tests run from another machine, use the same release there.
 
+Call the pinned executable from automation. The package currently exposes the CLI. The requested public JavaScript interface is tracked upstream. [Manager library](https://github.com/link-assistant/hive-mind/issues/4116)
+
 Copy [staging.conf](../examples/hive-manager/staging.conf) to a new profile directory on the target through the existing SSH alias. The profile uses the pinned plain image, a distinct name, and a state directory relative to the profile. Verify host keys, the configured jump chain, capacity to pull the image, and permission to use Docker and read its service journal. With the deployment's actual staging alias and remote profile path, run:
 
 ```bash
@@ -96,6 +98,8 @@ Confirm each candidate is absent from the live queue and active task records. If
 Keep the deployment's existing proxy port, name, image, secret, workers, connection limits, and installed MSS rules in the private baseline. The documented legacy classic setup uses 443, four workers, an MSS of 1200, and a nofile limit of 524288. Check these values on the target before selecting a replacement. The 8443 candidate must have a separate name and state.
 
 Inspect state with `deploy proxy --proxy-name NAME --port PORT status` and `verify`. Use `snapshot` and `compare` once the state has a manager-owned secret. Preserve the legacy snapshot while the existing proxy is untouched. The manager's `verify` tries Telegram DCs from the deployment host. Check egress from the running proxy's network namespace separately. Review `mss-unit` output against the installed rules before changing them. Use `apply` for a separate staging proxy in an authorized window. For an exact-name cutover, `--adopt` before `proxy` authorizes `update` on the legacy container. On first creation or replacement, the manager imports `--secret-file` if its proxy state has no saved secret. `apply` on an existing container simply ensures it is started. A successful `update` removes its predecessor, so preserve the original image digest, secret, and launch settings in the legacy rollback procedure before updating.
+
+For an individually managed proxy, `deploy proxy --proxy-name NAME --port PORT stop` pauses it and `remove` removes its container while preserving the secret. Use the [legacy undeploy runbook](../src/hive-control-center/docs/DEPLOY.md#removing-or-temporarily-stopping-the-proxy) when the deployment needs to sweep old container names and disable or remove the installed legacy MSS hook. [Multi-container and MSS gap](https://github.com/link-assistant/hive-mind/issues/4111#issuecomment-7060642659)
 
 Run the client probes **from the affected network** with a dedicated, authorized account. Store the Telegram API credentials JSON, preauthorized StringSession, proxy secret, and a deterministic harmless photo in a private test directory. Run both controls using the pinned client release:
 

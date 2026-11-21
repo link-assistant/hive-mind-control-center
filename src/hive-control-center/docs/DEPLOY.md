@@ -1,5 +1,10 @@
 # Hive Mind deploy notes
 
+Use the [pinned Hive Mind Manager runbook](../../../docs/hive-manager-migration.md)
+for staging, Docker diagnostics, and individually managed proxies. The commands
+below cover legacy installations that still depend on the original deployment
+profile, proxy sweep, or MSS hook.
+
 `deploy-remote-docker.mjs` deploys `deploy-docker.mjs` to the server
 defined in `.lenv` (`SERVER_IP`, `SERVER_USER`, `SERVER_PASS`) and runs it
 there. The local script supports both hive-mind image variants and several
