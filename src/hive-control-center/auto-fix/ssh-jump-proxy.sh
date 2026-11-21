@@ -4,7 +4,7 @@
 # from the environment or .lenv. Passwords never appear on the command line.
 set -eu
 
-here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 lenv=${LENV_FILE:-$here/../.lenv}
 
 read_key() {
@@ -48,7 +48,7 @@ jump_port=$(value JUMP_PORT 22)
 [ -n "$jump_host" ] || { echo "SSH jump proxy: JUMP_HOST is not set" >&2; exit 1; }
 [ -n "$jump_pass" ] || { echo "SSH jump proxy: JUMP_PASS is not set" >&2; exit 1; }
 
-export SSHPASS=$jump_pass
+export SSHPASS="$jump_pass"
 exec sshpass -e ssh \
   -o StrictHostKeyChecking=no \
   -o UserKnownHostsFile=/dev/null \
