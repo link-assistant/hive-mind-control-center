@@ -56,7 +56,8 @@ Statuses:
 | Deploy flags    | `--mtproxy-classic-image`                              | UNTESTED | Default image used; alternate tag not exercised.                       |
 | Deploy flags    | `--mtproxy-workers`, `--mtproxy-port`, `--mtproxy-mss` | PASS     | Current values deployed and verified.                                  |
 | Deploy flags    | `--mtproxy-fronting-host`                              | PASS     | Three hosts exercised with mtg.                                        |
-| Deploy flags    | `--mtproxy-undeploy`, `--mtproxy-undeploy-temporary`   | UNTESTED | Added for safe runtime removal; not yet run against the production proxy. |
+| Deploy flags    | `--mtproxy-undeploy`                                   | PASS     | Run against production on 2026-11-21: removed `mtproxy`, `mtproxy-classic`, and `mtproxy-classic-443-old`; MSS unit/script removed; hive-mind untouched. |
+| Deploy flags    | `--mtproxy-undeploy-temporary`                         | UNTESTED | Same legacy-name sweep; not yet run against the production proxy.      |
 | Deploy flags    | `--dangerously-show-secrets`                           | N/A      | Deliberately avoided; secrets stay root-only.                          |
 | Deploy flags    | `--reset-docker` / unrelated hive-mind changes         | N/A      | Out of scope for MTProxy research.                                     |
 

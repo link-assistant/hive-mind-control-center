@@ -61,4 +61,16 @@ describe('MTProxy configuration coverage', () => {
       read('src/hive-control-center/docs/MTProxy-RESEARCH-BACKLOG.md')
     ).toContain('MTProxy-CONFIG-COVERAGE.md');
   });
+
+  it('uses a legacy-aware MTProxy container name pattern in cleanup paths', () => {
+    const pattern = '^mtproxy(-classic(-[0-9]+)?(-old)?)?$';
+    for (const file of sourceFiles.filter(
+      (name) => name.includes('deploy-') || name.includes('proxy-matrix')
+    )) {
+      expect(read(file)).toContain(pattern);
+    }
+    expect(read('src/hive-control-center/docs/DEPLOY.md')).toContain(
+      'mtproxy-classic-<port>-old'
+    );
+  });
 });
