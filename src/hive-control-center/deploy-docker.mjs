@@ -202,6 +202,11 @@ const MTPROXY_CLASSIC_CONFIG_DIR = `/root/.hive-mtproxy-classic-${MTPROXY_HOST_P
 const MTPROXY_CONTAINER = MTPROXY_ENGINE === 'classic'
   ? `mtproxy-classic-${MTPROXY_HOST_PORT}`
   : 'mtproxy';
+// Match every MTProxy container name this project has ever used: the current
+// `mtproxy-classic-<port>`, the legacy `mtproxy`/`mtproxy-classic`, and
+// half-migrated `mtproxy-classic-<port>-old` leftovers. Undeploy must remove
+// all of them, not just the name the current engine would create.
+const MTPROXY_CONTAINER_NAME_PATTERN = '^mtproxy(-classic(-[0-9]+)?(-old)?)?$';
 const MTPROXY_CONFIG_DIR = MTPROXY_ENGINE === 'classic'
   ? MTPROXY_CLASSIC_CONFIG_DIR
   : MTPROXY_MTG_CONFIG_DIR;
@@ -502,6 +507,15 @@ const getContainerStatus = async (name = CONTAINER) => {
   }
 };
 
+const listMtproxyContainers = async ({ runningOnly = false } = {}) => {
+  const command = `${runningOnly ? 'docker ps' : 'docker ps -a'} --format '{{.Names}}' | grep -E '${MTPROXY_CONTAINER_NAME_PATTERN}' || true`;
+  const result = await capture(command);
+  return result.stdout
+    .split('\n')
+    .map((name) => name.trim())
+    .filter(Boolean);
+};
+
 // ── Optional Telegram MTProto proxy (--mtproxy) ──────────────────────────────
 // Deploy `nineseconds/mtg`, a maintained FakeTLS MTProto proxy, so clients can
 // reach Telegram over networks where plain MTProto is blocked. The container:
@@ -781,37 +795,38 @@ const removeMtproxyMss = async ({ removeFiles = false } = {}) => {
 // are deliberately preserved: a later deploy therefore reuses the same
 // Telegram link, and nothing outside the proxy container/MSS hook is touched.
 const undeployMtproxy = async ({ temporary = false } = {}) => {
-  const status = await getContainerStatus(MTPROXY_CONTAINER);
+  const containers = await listMtproxyContainers();
   if (temporary) {
-    if (status === 'running') {
-      await run(`docker stop ${MTPROXY_CONTAINER}`, { silent: true });
-      console.log(`>>>   Stopped ${MTPROXY_CONTAINER} (container and config kept for restart).`);
+    const running = await listMtproxyContainers({ runningOnly: true });
+    if (running.length) {
+      await run(`docker stop ${running.join(' ')}`, { silent: true });
+      console.log(`>>>   Stopped ${running.join(', ')} (containers and config kept for restart).`);
     } else {
-      console.log(`>>>   ${MTPROXY_CONTAINER} is ${status}; nothing to stop.`);
+      console.log('>>>   No running MTProxy containers; nothing to stop.');
     }
     await removeMtproxyMss({ removeFiles: false });
-    const after = await getContainerStatus(MTPROXY_CONTAINER);
-    if (after === 'running') {
-      console.error(`>>> ERROR: ${MTPROXY_CONTAINER} is still running after the temporary undeploy.`);
+    const stillRunning = await listMtproxyContainers({ runningOnly: true });
+    if (stillRunning.length) {
+      console.error(`>>> ERROR: MTProxy container(s) still running after the temporary undeploy: ${stillRunning.join(', ')}.`);
       process.exit(1);
     }
-    console.log(`>>> ✅ MTProxy temporarily undeployed (${after}); config, secret, image, and container preserved.`);
+    console.log(`>>> ✅ MTProxy temporarily undeployed (${containers.length ? `containers preserved: ${containers.join(', ')}` : 'no containers present'}); config, secret, image, and container preserved.`);
     return;
   }
 
-  if (status !== 'not_found') {
-    await run(`docker rm -f ${MTPROXY_CONTAINER}`, { silent: true });
-    console.log(`>>>   Removed ${MTPROXY_CONTAINER}.`);
+  if (containers.length) {
+    await run(`docker rm -f ${containers.join(' ')}`, { silent: true });
+    console.log(`>>>   Removed ${containers.join(', ')}.`);
   } else {
-    console.log(`>>>   ${MTPROXY_CONTAINER} is not present; nothing to remove.`);
+    console.log('>>>   No MTProxy containers are present; nothing to remove.');
   }
   await removeMtproxyMss({ removeFiles: true });
-  const after = await getContainerStatus(MTPROXY_CONTAINER);
-  if (after !== 'not_found') {
-    console.error(`>>> ERROR: ${MTPROXY_CONTAINER} still exists after the undeploy (status: ${after}).`);
+  const remaining = await listMtproxyContainers();
+  if (remaining.length) {
+    console.error(`>>> ERROR: MTProxy container(s) still exist after the undeploy: ${remaining.join(', ')}.`);
     process.exit(1);
   }
-  console.log('>>> ✅ MTProxy undeployed; config/secret and image preserved so redeploy keeps the same Telegram link.');
+  console.log('>>> ✅ All MTProxy containers undeployed; config/secret and image preserved so redeploy keeps the same Telegram link.');
 };
 
 const saveClassicLink = (secret, publicIpv4) => {

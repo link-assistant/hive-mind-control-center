@@ -164,6 +164,14 @@ SERVER_IP: 0.0.0.0
 SERVER_USER: root
 SERVER_PASS:
 
+# Optional SSH jump host. When JUMP_HOST is set, deploy-remote-docker and
+# auto-fix reach SERVER_IP through it automatically. JUMP_PASS is never printed
+# or committed.
+# JUMP_HOST:
+# JUMP_USER: root
+# JUMP_PASS:
+# JUMP_PORT: 22
+
 # Queue: minimum gap the bot enforces between STARTING successive tasks (per tool),
 # in milliseconds. This is the "interval between tasks". 300000 = 5 minutes.
 # hive-mind env var: HIVE_MIND_MIN_START_INTERVAL_MS (default 600000 = 10 min).
@@ -254,6 +262,9 @@ const config = makeConfig({
       .option('server-ip', { default: getenv('SERVER_IP') })
       .option('server-user', { default: getenv('SERVER_USER') })
       .option('server-pass', { default: getenv('SERVER_PASS') })
+      .option('jump-host', { default: getenv('JUMP_HOST') || '' })
+      .option('jump-user', { default: getenv('JUMP_USER') || 'root' })
+      .option('jump-port', { default: getenv('JUMP_PORT') || '22' })
       .option('image-variant', {
         choices: ['dind', 'plain'],
         // Default is 'dind' (konard/hive-mind-dind:1.74.3+ on box-dind 2.1.4+);
@@ -511,6 +522,7 @@ const MTPROXY_REMOVE = MTPROXY_UNDEPLOY || MTPROXY_UNDEPLOY_TEMPORARY;
 const MTPROXY_ENGINE = String(config.mtproxyEngine || 'classic').toLowerCase();
 const MTPROXY_PORT = String(config.mtproxyPort || '443').trim();
 const MTPROXY_CONTAINER = MTPROXY_ENGINE === 'classic' ? `mtproxy-classic-${MTPROXY_PORT}` : 'mtproxy';
+const MTPROXY_CONTAINER_NAME_PATTERN = '^mtproxy(-classic(-[0-9]+)?(-old)?)?$';
 const MTPROXY_CONFIG_DIR = MTPROXY_ENGINE === 'classic' ? `/root/.hive-mtproxy-classic-${MTPROXY_PORT}` : '/root/.hive-mtproxy';
 const MTPROXY_LINK_PATH = `${MTPROXY_CONFIG_DIR}/link.txt`;
 
@@ -531,13 +543,29 @@ if (missing.length) {
   process.exit(1);
 }
 
+// Optional password-authenticated jump host. The helper reads the target and
+// jump credentials from .lenv itself, so no password appears in argv. This is
+// the same helper auto-fix uses; setting JUMP_HOST is enough to route both SSH
+// and SCP through the jump host.
+const JUMP_HOST = String(config.jumpHost || '').trim();
+const JUMP_USER = String(config.jumpUser || 'root').trim();
+const JUMP_PORT = String(config.jumpPort || '22').trim();
+const JUMP_PROXY = resolve(__dirname, 'auto-fix/ssh-jump-proxy.sh');
+if (JUMP_HOST) {
+  process.env.LENV_FILE = process.env.LENV_FILE || LENV_PATH;
+  process.env.JUMP_HOST = JUMP_HOST;
+  process.env.JUMP_USER = JUMP_USER;
+  process.env.JUMP_PORT = JUMP_PORT;
+}
+
 // ServerAliveInterval+CountMax keep the long-running remote node process from
 // dropping the SSH session mid-deploy (the previous run logged "Deploy
 // complete" while the remote was still waiting for dockerd — that was an
 // upstream NAT/firewall idle timeout, not a script-success).
 // TCPKeepAlive defends against intermediate proxies that ignore SSH-level
 // pings but honor TCP keepalives.
-const SSH_OPTS = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=120 -o TCPKeepAlive=yes -o LogLevel=ERROR -o PubkeyAuthentication=no -o PreferredAuthentications=password,keyboard-interactive';
+const SSH_OPTS = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=120 -o TCPKeepAlive=yes -o LogLevel=ERROR -o PubkeyAuthentication=no -o PreferredAuthentications=password,keyboard-interactive'
+  + (JUMP_HOST ? ` -o ProxyCommand=${JUMP_PROXY}` : '');
 
 // sshpass exit 5 = password rejected: the remote command never ran, so a retry is
 // always safe. Observed 2026-10-07: sshd logged "Failed password" for the CORRECT
@@ -594,6 +622,15 @@ const ssh = async (command, { silent = false, ignoreErrors = false } = {}) => {
     log(`Command failed (code ${error.code}):`, error.message || error);
     if (!ignoreErrors) throw error;
   }
+};
+
+const listMtproxyContainers = async ({ runningOnly = false } = {}) => {
+  const command = `${runningOnly ? 'docker ps' : 'docker ps -a'} --format '{{.Names}}' | grep -E '${MTPROXY_CONTAINER_NAME_PATTERN}' || true`;
+  const result = await ssh(command, { silent: true, ignoreErrors: true });
+  return String(result?.stdout || '')
+    .split('\n')
+    .map((name) => name.trim())
+    .filter(Boolean);
 };
 
 // Like ssh(), but allocates a pseudo-TTY (-tt). Use this for the ONE long-lived
@@ -1881,8 +1918,8 @@ const runMtproxyUndeploy = async () => {
   const modeFlag = temporary ? '--mtproxy-undeploy-temporary' : '--mtproxy-undeploy';
   await mtproxyMaintenancePreflight(modeFlag);
 
-  const before = (await ssh(`docker inspect -f '{{.State.Status}}' ${MTPROXY_CONTAINER} 2>/dev/null || echo missing`, { silent: true, ignoreErrors: true }))?.stdout?.trim() || 'missing';
-  note(`${MTPROXY_CONTAINER} before ${modeFlag}: ${before}`);
+  const before = await listMtproxyContainers();
+  note(`MTProxy container(s) before ${modeFlag}: ${before.length ? before.join(', ') : 'none'}`);
 
   nextStep(`${modeFlag}: ${temporary ? 'stopping' : 'removing'} the proxy container and MSS hook`);
   note(`Using isolated staging dir ${MTPROXY_UNDEPLOY_REMOTE_DIR} (root-only; removed afterwards)`);
@@ -1903,18 +1940,21 @@ const runMtproxyUndeploy = async () => {
     await ssh(`rm -rf ${MTPROXY_UNDEPLOY_REMOTE_DIR}`, { silent: true, ignoreErrors: true });
   }
 
-  const after = (await ssh(`docker inspect -f '{{.State.Status}}' ${MTPROXY_CONTAINER} 2>/dev/null || echo missing`, { silent: true, ignoreErrors: true }))?.stdout?.trim() || 'missing';
-  if (temporary && after === 'running') {
-    console.error(`>>> ERROR: ${MTPROXY_CONTAINER} is still running after the temporary undeploy.`);
-    process.exit(1);
+  if (temporary) {
+    const running = await listMtproxyContainers({ runningOnly: true });
+    if (running.length) {
+      console.error(`>>> ERROR: MTProxy container(s) still running after the temporary undeploy: ${running.join(', ')}.`);
+      process.exit(1);
+    }
+    ok('All MTProxy containers stopped; containers, config, secret, and image preserved for --mtproxy-only');
+  } else {
+    const remaining = await listMtproxyContainers();
+    if (remaining.length) {
+      console.error(`>>> ERROR: MTProxy container(s) still exist after the undeploy: ${remaining.join(', ')}.`);
+      process.exit(1);
+    }
+    ok('All MTProxy containers removed; config/secret preserved for a stable-link redeploy');
   }
-  if (!temporary && after !== 'missing') {
-    console.error(`>>> ERROR: ${MTPROXY_CONTAINER} still exists after the undeploy (status: ${after}).`);
-    process.exit(1);
-  }
-  ok(temporary
-    ? `${MTPROXY_CONTAINER} stopped (${after}); container, config, secret, and image preserved for --mtproxy-only`
-    : `${MTPROXY_CONTAINER} removed (${after}); config/secret preserved for a stable-link redeploy`);
   ok('hive-mind and all other containers were never stopped, restarted, or modified');
 };
 

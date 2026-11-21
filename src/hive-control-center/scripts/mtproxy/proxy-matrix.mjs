@@ -497,7 +497,7 @@ export const renderMarkdown = (summary) => {
 const cleanupExistingProxies = (lenv, timeout) =>
   sshExec(
     lenv,
-    "docker ps -a --format '{{.Names}}' | grep -E '^mtproxy(-classic-[0-9]+)?$' | xargs -r docker rm -f",
+    "docker ps -a --format '{{.Names}}' | grep -E '^mtproxy(-classic(-[0-9]+)?(-old)?)?$' | xargs -r docker rm -f",
     timeout
   );
 
