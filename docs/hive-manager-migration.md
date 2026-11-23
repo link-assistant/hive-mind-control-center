@@ -1,21 +1,19 @@
 # Migrate Control Center operations to Hive Mind Manager
 
-Use Hive Mind **2.45.0** for the staging exercise. Keep the SSH configuration, profiles, credentials, active-task records, incident routes, and scheduler with the deployment that owns them. The [command inventory and verification record](case-studies/issue-1/README.md) lists the release gaps and the requirements for moving each live caller.
+Use Hive Mind **2.48.0** for the staging exercise. Keep the SSH configuration, profiles, credentials, active-task records, incident routes, and scheduler with the deployment that owns them. The [command inventory and verification record](case-studies/issue-1/README.md) lists the release gaps and the requirements for moving each live caller.
 
 ## Prepare the operator and staging host
 
-Install the pinned CLI in a private operator directory. Using that copy for remote commands sends the installed manager script over OpenSSH.
+Install the pinned CLI in a private operator directory with Node.js 24 or later.
 
 ```bash
 umask 077
-npm install --prefix "$HOME/.local/hive-manager-2.45.0" --omit=optional @link-assistant/hive-mind@2.45.0
-manager="$HOME/.local/hive-manager-2.45.0/node_modules/.bin/hive-manager"
+npm install --prefix "$HOME/.local/hive-manager-2.48.0" --omit=optional @link-assistant/hive-mind@2.48.0
+manager="$HOME/.local/hive-manager-2.48.0/node_modules/.bin/hive-manager"
 "$manager" --version
 ```
 
-Expect `2.45.0`. The [release documentation](https://github.com/link-assistant/hive-mind/blob/v2.45.0/docs/deployment/hive-manager.md) describes the commands and authentication. If Docker or Telegram tests run from another machine, use the same release there.
-
-Call the pinned executable from automation. The package currently exposes the CLI. The requested public JavaScript interface is tracked upstream. [Manager library](https://github.com/link-assistant/hive-mind/issues/4116)
+Expect `2.48.0`. The pinned executable sends its Bash program over OpenSSH. For commands that dispatch package modules on the host, also install 2.48.0 on the target and verify `ssh ALIAS hive-manager --version` resolves it on the noninteractive PATH. Check the container version independently when running commands inside the deployment. The operator's local environment variable `HIVE_MANAGER_PACKAGE_VERSION` does not pin the remote npm fallback. [Release documentation](https://github.com/link-assistant/hive-mind/blob/v2.48.0/docs/deployment/hive-manager.md), [SSH package pin](https://github.com/link-assistant/hive-mind/issues/4135)
 
 Copy [staging.conf](../examples/hive-manager/staging.conf) to a new profile directory on the target through the existing SSH alias. The profile uses the pinned plain image, a distinct name, and a state directory relative to the profile. Verify host keys, the configured jump chain, capacity to pull the image, and permission to use Docker and read its service journal. With the deployment's actual staging alias and remote profile path, run:
 
@@ -24,7 +22,7 @@ stage_host=hive-staging
 stage_profile=./hive-manager-stage/staging.conf
 stage=("$manager" --host "$stage_host" deploy --profile "$stage_profile")
 
-ssh "$stage_host" true
+ssh "$stage_host" hive-manager --version
 "${stage[@]}" --dry-run --setup apply
 "${stage[@]}" docker-service status
 "${stage[@]}" doctor
@@ -33,14 +31,14 @@ ssh "$stage_host" true
 "${stage[@]}" status
 "${stage[@]}" doctor
 "${stage[@]}" diagnose --since '1 hour ago' --resources
-"${stage[@]}" disk
+"${stage[@]}" disk --budget 30
 ```
 
 The setup container runs without a Telegram bot token. Record the SSH route, Docker daemon ID, image digest, container ID, and resolved mounts in a private operator log. Inspect diagnostic results for missing permissions or unavailable data. Keep any test bot token and allowlist in a separate staging environment file readable by the deployment account.
 
 ### Prove backup, update, rollback, and interrupted-update recovery
 
-Create a harmless marker inside a staging state mount, then take an application-consistent backup. Back up any separately mounted config or Docker volumes with the deployment's existing procedure. Keep the local archive and restored directory private.
+Create a harmless marker inside a staging state mount, then take an application-consistent backup. The manager streams the profile's state directory. Use the existing private backup procedure for any separate config, Docker volumes, or provider snapshots. Keep the local archive and restored directory private.
 
 ```bash
 "${stage[@]}" exec -- bash -c 'printf "staging probe\n" > "$HOME/.codex/migration-probe"'
@@ -70,20 +68,31 @@ For an instance proven to use the correct layout, preview `deploy --profile PROF
 
 ## Disk, tasks, watchers, and incidents
 
-Run the following with the deployment's actual `--host` and `--profile`. First preview and save output in the deployment's private log.
+Run these commands with the deployment's actual `--host` and `--profile`. Save previews and receipts in a private operator directory.
 
-| Workflow                    | Manager entry point                                                                                                        | Check before moving the caller                                                                                                                                                                                                                                                                                                             |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Disk and daemon diagnostics | `deploy disk`, `deploy doctor`, `deploy diagnose --since '1 hour ago' --resources`                                         | Keep the per-task legacy disk report for writable layers, paused tasks, and host-directory attribution.                                                                                                                                                                                                                                    |
-| Routine cleanup             | `deploy cleanup --dry-run`                                                                                                 | Inspect candidates in the bot's own environment. Use legacy guarded cleanup for protected host paths, targeted task layers, or memory pressure. The manager's `--docker` mode requests a host-wide prune.                                                                                                                                  |
-| Failed-task retention       | `deploy tasks backup-container CONTAINER --output NEW_DIRECTORY`, then `deploy tasks cleanup-backed-up NEW_DIRECTORY`      | Confirm stopped-container identity and the approval digest. Preserve mounted data, execution records and logs separately. Run the removal with `--apply DIGEST` only after verifying the private backup and its independent evidence.                                                                                                      |
-| Active tasks and watchers   | `deploy tasks list --running`, `deploy tasks status UUID`, `deploy tasks attach UUID --read-only`                          | Compare each active or paused task to the same Docker daemon, container ID, execution UUID, attempt and existing watcher. Capture another baseline after the update before repairing anything.                                                                                                                                             |
-| Reconciliation and recovery | `deploy tasks repair-records UUID`, `deploy tasks recover-failed`                                                          | Verify their previews against running state. Apply a supported record repair with `--apply` only for the expected detached attempt. Use `deploy tasks resume-all` to reconcile records already marked executing after checking active families. Keep the fallback for alias exit 127, eligible later retries, and writable-layer headroom. |
-| Incident publication        | `deploy tasks report --group`, `deploy tasks report --collect UUID --attempt N`, `deploy diagnose --task UUID --attempt N` | Correlate known attempts with their log offsets, daemon journal, and historical route before previewing a post.                                                                                                                                                                                                                            |
+| Workflow                    | Manager command after `deploy --profile PROFILE`                                                                         | Check before moving the caller                                                                                                                                                                                                                     |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Storage and diagnostics     | `disk --budget 30`, `doctor`, `diagnose --since '1 hour ago' --resources`                                                | Compare per-task attribution for running, paused and stopped tasks. Investigate unavailable measurements and host permissions.                                                                                                                     |
+| Scoped cleanup              | `cleanup --scoped --dry-run`, then `cleanup --scoped --status`                                                           | Compare the protected paths, scope, memory guards and exact preview. Use `--apply PREVIEW_ID` only for the reviewed preview. Check status after SSH loss and request a fresh preview after interruption or partial apply.                          |
+| Failed-task retention       | `tasks preserve-layer CONTAINER --output NEW_DIRECTORY`, then `tasks cleanup-preserved NEW_DIRECTORY`                    | Verify the stopped container, writable-layer evidence, execution record and task logs. Back up mounted data independently. Use `--apply DIGEST` only after verifying the private backup. Use `backup-container` for a flattened filesystem export. |
+| Active tasks and watchers   | `tasks list --running`, `tasks status UUID`, `tasks attach UUID --read-only`                                             | Compare the daemon, container ID, execution UUID, attempt and watcher before and after update.                                                                                                                                                     |
+| Reconciliation and recovery | `tasks repair-records UUID`, `tasks resume-all`, `tasks recover-failed --execution UUID --attempt N --max-resumes COUNT` | Match the stored attempt to the running snapshot. Use `resume-all` for records already marked executing. Preview alias exit 127 and later eligible retries with the original resume policy, and inspect snapshot headroom before applying.         |
+| Tool maintenance            | `update-dependencies`, `global-tools --policy FILE`, `tool-services --tools codex,claude`, `tasks check-uploads`         | Compare the profile's config allowlist, dependency backups and service blockers. Use the release guide's host prerequisites. Upload termination requires `--terminate PID` and an identity and progress recheck.                                   |
+| Incident evidence           | `tasks report --group`, `tasks report --collect UUID --attempt N`, `diagnose --task UUID --attempt N`                    | Match known attempts to their log offsets, daemon journal and historical route.                                                                                                                                                                    |
 
-Use `deploy tasks check-uploads` for stalled uploads. Check the deployment's same-user CPU and I/O thresholds and verify the process identity. `--terminate PID` requires an explicit PID and current evidence.
+See the [manager maintenance guide](https://github.com/link-assistant/hive-mind/blob/v2.48.0/docs/deployment/hive-manager.md#maintenance-and-diagnostics) for host and container prerequisites, selectors, and rollback.
 
-For an incident, place the deployment's reviewed route file where the command runs and preview `deploy tasks report --incident UUID --attempt N --destination OWNER/REPO --routes FILE`. Review the backend, failure kind, exit code, signature and selected issue, and compare the legacy ledger and issue comments for a duplicate. Use `--host-signature` only when the corresponding attempt's time window supports the diagnosis. An unmatched failure previews a new issue. Closed issue routes require the legacy version-aware review until ledger and routing parity is available. Pass `--publish REVIEW_DIGEST` only for the reviewed destination and evidence.
+To compare a saved task inventory offline, capture the start-command JSON list from the selected deployment in a private file and pass it to the migration command. It uses the pinned manager's public JavaScript library to count states and group historical failures, including failures in tasks whose latest attempt succeeded.
+
+```bash
+(umask 077; set -o noclobber; "${stage[@]}" tasks list --output-format json > task-records.json)
+(umask 077; set -o noclobber; node src/hive-control-center/auto-fix.mjs \
+  --inspect-task-snapshot task-records.json > task-summary.json)
+```
+
+Use `HIVE_MANAGER_PREFIX` if the package is installed in a different prefix. Keep snapshots and summaries private.
+
+To check historical reporting, preview `deploy tasks report --incident UUID --attempt N --destination OWNER/REPO --reconcile --legacy-ledger FILE`. Put the ledger and reviewed route file in the environment that runs the command. For a publication preview, use `--routes FILE` in place of the reconciliation flags. Verify the backend, exit code, signature, matching attempt, selected issue and previous report markers. Use `--host-signature` only with journal evidence for that attempt. Review closed issue routes and their recorded version against the legacy ledger. Use `--publish REVIEW_DIGEST` for the individually approved plan. Scheduled multi-attempt reporting still uses the existing deployment procedure. [Automatic incident reporting](https://github.com/link-assistant/hive-mind/issues/4132)
 
 To recover the bot queue, retain verbose logs from before and after the restart, both including queue initialization. Run locally on those files:
 
@@ -95,41 +104,45 @@ Confirm each candidate is absent from the live queue and active task records. If
 
 ## MTProxy maintenance and client checks
 
-Keep the deployment's existing proxy port, name, image, secret, workers, connection limits, and installed MSS rules in the private baseline. The documented legacy classic setup uses 443, four workers, an MSS of 1200, and a nofile limit of 524288. Check these values on the target before selecting a replacement. The 8443 candidate must have a separate name and state.
+Record the existing name, port, image, secret hash, workers, connection limits, and MSS rules. The documented legacy classic deployment uses 443, four workers, an MSS of 1200, and a nofile limit of 524288. Confirm the actual settings on the target. An independent 8443 stage needs its own name and state.
 
-Inspect state with `deploy proxy --proxy-name NAME --port PORT status` and `verify`. Use `snapshot` and `compare` once the state has a manager-owned secret. Preserve the legacy snapshot while the existing proxy is untouched. The manager's `verify` tries Telegram DCs from the deployment host. Check egress from the running proxy's network namespace separately. Review `mss-unit` output against the installed rules before changing them. Use `apply` for a separate staging proxy in an authorized window. For an exact-name cutover, `--adopt` before `proxy` authorizes `update` on the legacy container. On first creation or replacement, the manager imports `--secret-file` if its proxy state has no saved secret. `apply` on an existing container simply ensures it is started. A successful `update` removes its predecessor, so preserve the original image digest, secret, and launch settings in the legacy rollback procedure before updating.
+- Use `deploy proxy --proxy-name NAME --port PORT status` and `verify`. Save a baseline with `--check-egress --check-mss snapshot`. Use `--secret-file FILE` to read the existing key in place on the Docker host. Compare the candidate against that baseline using `compare -` and stdin.
+- Use `deploy --adopt proxy --proxy-name NAME --port PORT apply` to migrate a legacy classic proxy after checking the mounted or supplied secret. Keep the predecessor until the affected client network passes the checks below. For another engine such as FakeTLS, stage a stopped candidate with the same selected host port. Use `trial-plan`, review container IDs and bindings, then run `trial -` with the approved plan. Use `rollback` to restore the predecessor and `accept` after successful client verification.
+- Use `proxy inventory` to inspect legacy containers. Review a `cleanup-plan` with an explicit `--select NAME` for each chosen resource. Include `--legacy-mss` only when the old unit and all its associated rules belong to the change. Keep its source and current settings for rollback. For manager-owned IPv4 rules, review `mss-unit` before installing it. Use `capture` and `proxy-pcap --compare` for bounded paired captures when the media probe stalls.
 
-For an individually managed proxy, `deploy proxy --proxy-name NAME --port PORT stop` pauses it and `remove` removes its container while preserving the secret. Use the [legacy undeploy runbook](../src/hive-control-center/docs/DEPLOY.md#removing-or-temporarily-stopping-the-proxy) when the deployment needs to sweep old container names and disable or remove the installed legacy MSS hook. [Multi-container and MSS gap](https://github.com/link-assistant/hive-mind/issues/4111#issuecomment-7060642659)
-
-Run the client probes **from the affected network** with a dedicated, authorized account. Store the Telegram API credentials JSON, preauthorized StringSession, proxy secret, and a deterministic harmless photo in a private test directory. Run both controls using the pinned client release:
+Run the pinned release **from the affected network** using an authorized test account, a private Telegram API credentials file, a preauthorized StringSession, and the proxy secret. Use the same text, exact document and decoded photo checks on direct, baseline and candidate routes. [Manager proxy guide](https://github.com/link-assistant/hive-mind/blob/v2.48.0/docs/deployment/hive-manager.md#telegram-mtproto-proxy)
 
 ```bash
 probe=("$manager" proxy-test --credentials ./telegram-api.json --session-file ./test.session)
-"${probe[@]}" --direct --media --photo ./probe.png
+"${probe[@]}" --direct --media --roundtrip-photo
 "${probe[@]}" --proxy-host "$proxy_host" --proxy-port "$proxy_port" \
-  --secret-file ./mtproxy.secret --media --photo ./probe.png
+  --secret-file ./mtproxy.secret --media --roundtrip-photo
 ```
 
-Check text, exact document bytes, and decoded photo dimensions and content using the existing known-good test. Record the network, timestamp, release, port, candidate configuration, and results without secrets or raw captures. Use the legacy matrix and rollback procedure when two candidates must take turns on one port. The manager's `--matrix` can compare routes that are up simultaneously. Keep the existing client checks until the pinned proxy passes both text and media from the affected network. [Legacy MTProxy verification](../src/hive-control-center/docs/MTProxy-VERIFICATION.md)
+Use `--photo FILE` if the deployment needs a specific harmless photo. Record the network, timestamp, release, port, candidate settings and result. Keep raw captures and secrets in the deployment's private workspace. The [legacy verification record](../src/hive-control-center/docs/MTProxy-VERIFICATION.md) describes the known client-network symptoms.
 
 ## Move the private archive scheduler
 
-1. Identify the active schedule, account, exact source paths, source repository allowlist, attachment and LINO settings, and private redaction inputs. Pause the scheduler in its owning deployment and check that no publisher is running. Keep a copy of its configuration and the existing archive's Git tip. Verify the destination is private, its default branch exists, the scheduler account has push access, and the account has access to the intended inactive sources. Preserve the existing destination, branch, and history.
-2. Before allowing a push, resolve the legacy revision-index and known-secrets gaps. The 2.45.0 native index cannot identify already archived legacy revisions by their old SHA-256 metadata. Carry over source directories using `--claude-dir` and `--codex-dir`. Review the need for `--lino`, `--tool-results`, the age policy, large-file omissions, and the legacy archive summary. Run previews as the existing scheduler account in an unshared directory with `umask 077` and the pinned manager. Stage one bounded, intended source with the existing output policy. `NEW_REVIEW_DIRECTORY` must not exist.
+1. Identify the live schedule, account, source paths, repository allowlist, attachment and LINO settings, age policy, and private redaction inputs. Pause the scheduler in its owning deployment and check that no publisher is running. Record the destination's current Git tip and keep its existing private branch and history. Verify privacy, default branch, push permission, and access to inactive sources using the scheduler's account.
+2. Run a bounded marker-only legacy import preview as the scheduler account. Use the same policy for import and incremental publication. Extend `policy` only with the approved `--only`, `--lino`, `--tool-results`, and `--min-age` values. Supply `--known-secrets-file` for deployments that require extra literals.
 
    ```bash
+   umask 077
    gh repo view "$archive" --json visibility,viewerPermission,defaultBranchRef
-   "$manager" archive-sessions --repo "$source_repo" --published-in "$archive" \
-     --output "$review_dir" --limit 1
-   "$manager" archive-publish "$review_dir" --destination "$archive"
+   policy=(--claude-dir "$claude_dir" --codex-dir "$codex_dir")
+   redaction=(--known-secrets-file "$private_literals")
+   source=("$manager" archive-sessions --repo "$source_repo" "${policy[@]}" "${redaction[@]}")
+   "${source[@]}" --import-legacy "$archive" --limit 10
+   "${source[@]}" --import-legacy "$archive" --limit 10 --apply "$import_digest"
+   "${source[@]}" --published-in "$archive" --output "$review_dir" --limit 1
+   "$manager" archive-publish "$review_dir" --destination "$archive" --private "${redaction[@]}"
    ```
 
-   Inspect the manifest, every staged file, the destination and review digest. Use the current private redaction/exclusion checks and confirm the revision was never published under the legacy flow. When the bounded incremental batch is authorized, recheck privacy and scheduler pause, then run `archive-publish` again with `--apply REVIEW_DIGEST`. Verify the commit is a descendant of the recorded tip, the diff contains exactly the reviewed additions, and the subsequent preview skips the published revision.
+   Inspect the import evidence and marker paths before applying. Repeat review for each import batch. Keep split or oversized legacy revisions and the historical README in place. Check import skips and any attachment, format or redaction differences against the deployment's policy. The manager records new batches in manifests. Its 40 MiB transcript limit can omit revisions that the legacy exporter splits. [Legacy import and publication](https://github.com/link-assistant/hive-mind/blob/v2.48.0/docs/deployment/hive-manager.md#import-an-existing-private-archive), [Oversized and split archives](https://github.com/link-assistant/hive-mind/issues/4134)
 
-3. With the scheduler still paused, test the rollback on an isolated private archive with the same history shape. The [local rollback experiment](../experiments/issue-1/archive-rollback.sh) exercises this with a disposable Git remote. For a real approved batch rollback, check current remote tip first. Revert only the exact publication commits, including their index additions, from a clone of the current default branch, then verify older Git history and archive paths remain. Use a fresh preview to confirm the reverted revision is eligible again before deciding whether to resume the scheduler. Keep the archive private. A revert leaves Git objects containing the original publication in history, so use the deployment's private incident procedure for any sensitive material.
-4. Once the first incremental batch and rollback are proven and the existing policy is supported, change the scheduler to use the absolute pinned executable with `archive-sessions --repo OWNER/REPO --publish-private OWNER/PRIVATE_ARCHIVE --limit 3`, one permitted source at a time. Keep overlap prevention, owner account, private logs, and approved export flags in the deployment. Confirm an actual scheduled run and subsequent deduplication before retiring the previous schedule.
-
-See the [legacy archive runbook](../src/hive-control-center/docs/archive-public-sessions.md) for its behavior and exclusion policy.
+3. Inspect every staged file, the manifest, its destination, and its publication digest. Recheck privacy and the pause. Apply the first authorized incremental batch by repeating the same `archive-publish` command with `--apply "$publish_digest"`. Verify that the commit is a descendant of the recorded tip, that the diff matches the reviewed additions, and that the next preview skips the published revision.
+4. Rehearse rollback on an isolated private Git destination with the same history shape while the scheduler is paused. The [local fixture](../experiments/issue-1/archive-rollback.sh) exercises import, first incremental publication, and rollback. To revert a real approved batch, check the current remote tip and revert only its publication commits and index markers, preserving earlier and unrelated commits. Verify the reverted revision is eligible again. Reverting preserves Git objects, so use the deployment's private incident procedure for sensitive material.
+5. When the approved policy, incremental batch and rollback are verified, switch the scheduler to the absolute pinned executable with `archive-sessions --repo OWNER/REPO --publish-private OWNER/PRIVATE_ARCHIVE --limit 3` and the same source flags, one allowed source at a time. Keep overlap prevention, account, configuration and private logs in the deployment. Confirm an actual scheduled run and subsequent deduplication before retiring the old scheduler.
 
 ## Retire the previous entry points
 

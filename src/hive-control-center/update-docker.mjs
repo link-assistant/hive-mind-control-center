@@ -1,31 +1,6 @@
 #!/usr/bin/env node
 
-const { use } = eval(
-  await fetch('https://unpkg.com/use-m@8.16.4/use.js').then((u) => u.text())
-);
-
-// Versions are pinned on purpose: an unpinned `command-stream` silently picked
-// up 2.0.0 (Node >=22, node-pty without linux-x64 prebuilds) and broke deploys
-// on Node 20 hosts without a build toolchain (link-foundation/command-stream#218).
-// Workaround for link-foundation/use-m#78: that failed install deleted the
-// `command-stream-v-latest` alias but left its bin symlink dangling, so every
-// later alias install died with EEXIST. Drop such a dead link before use().
-await (async () => {
-  const { execSync } = await import('node:child_process');
-  const { lstatSync, existsSync, readlinkSync, unlinkSync } = await import('node:fs');
-  const { join } = await import('node:path');
-  try {
-    const prefix = execSync('npm prefix -g', { encoding: 'utf8' }).trim();
-    const bin = join(prefix, process.platform === 'win32' ? '' : 'bin', 'command-stream');
-    if (lstatSync(bin).isSymbolicLink() && !existsSync(bin)
-        && readlinkSync(bin).includes('command-stream-v-')) {
-      unlinkSync(bin);
-    }
-  } catch {}
-})();
-
-const { $ } = await use('command-stream@1.6.2');
-const { makeConfig } = await use('lino-arguments@0.3.0');
+import { $, makeConfig } from './scripts/legacy-runtime.mjs';
 
 // Load configuration from .lenv (makeConfig for single values + CLI args)
 const config = makeConfig({

@@ -3,7 +3,9 @@
 set -euo pipefail
 
 manager=${1:-hive-manager}
-[[ $("$manager" --version) == 2.45.0 ]]
+[[ $("$manager" --version) == 2.48.0 ]]
+package=$(dirname "$(dirname "$(dirname "$(realpath "$(command -v "$manager")")")")")
+modules=$(dirname "$(dirname "$package")")
 [[ -S /var/run/docker.sock && $(docker context show) == default && -z ${DOCKER_HOST:-} ]] || exit 1
 
 work=$(mktemp -d)
@@ -21,10 +23,13 @@ trap cleanup EXIT
 
 docker build --tag "$image" - <<'DOCKERFILE'
 FROM docker:29-cli@sha256:34507eb5069d8be82c95dd3b6987d4250fd5fee49b82e2509b7d7a7030740d6d AS cli
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS node
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 COPY --from=cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
 RUN apt-get update && apt-get install -y --no-install-recommends openssh-server && \
     rm -rf /var/lib/apt/lists/* && mkdir -p /run/sshd && useradd --create-home box && \
+    ln -s /fixture-manager/node_modules/@link-assistant/hive-mind/src/hive-manager/cli.sh /usr/local/bin/hive-manager && \
     printf '#!/bin/sh\nprintf "fixture Hive Mind\\n"\n' >/usr/local/bin/hive && chmod +x /usr/local/bin/hive
 DOCKERFILE
 
@@ -37,7 +42,8 @@ for server in gateway target; do
   if [[ $server == gateway ]]; then
     server_flags=(--publish 127.0.0.1::22)
   else
-    server_flags=(--mount "type=bind,source=$work,target=$work" --volume /var/run/docker.sock:/var/run/docker.sock)
+    server_flags=(--mount "type=bind,source=$work,target=$work" --volume /var/run/docker.sock:/var/run/docker.sock
+      --mount "type=bind,source=$modules,target=/fixture-manager/node_modules,readonly")
   fi
   docker run -d --name "$name-$server" --network "$name" "${server_flags[@]}" \
     --mount "type=bind,source=$work/$server,target=/host-key,readonly" \
@@ -71,6 +77,7 @@ for ((attempt = 0; attempt < 5; attempt++)); do
   if ssh -F "$work/ssh.conf" target true; then break; fi
   sleep 1
 done
+[[ $(ssh -F "$work/ssh.conf" target hive-manager --version) == 2.48.0 ]]
 
 cat > "$work/stage.conf" <<EOF
 name=$name
@@ -85,7 +92,7 @@ stage=("${remote[@]}" --profile "$work/stage.conf")
 first=$(docker inspect --format '{{.Id}}' "$name")
 "${stage[@]}" doctor
 "${stage[@]}" diagnose --resources
-"${stage[@]}" disk
+"${stage[@]}" disk --budget 15
 
 "${stage[@]}" exec -- bash -c 'printf persisted > /home/box/.codex/probe'
 "${stage[@]}" stop

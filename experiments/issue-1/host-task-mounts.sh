@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Run on an isolated Linux Docker daemon. Pass the installed 2.45.0 package directory.
+# Run on an isolated Linux Docker daemon. Pass the installed 2.48.0 package directory.
 set -euo pipefail
 
-package=$(realpath "${1:?Expected the installed Hive Mind 2.45.0 package directory}")
-[[ $(node -p 'require(process.argv[1]).version' "$package/package.json") == 2.45.0 ]]
+package=$(realpath "${1:?Expected the installed Hive Mind 2.48.0 package directory}")
+[[ $(node -p 'require(process.argv[1]).version' "$package/package.json") == 2.48.0 ]]
 [[ -S /var/run/docker.sock && $(docker context show) == default && -z ${DOCKER_HOST:-} ]] || exit 1
 
 work=$(mktemp -d)

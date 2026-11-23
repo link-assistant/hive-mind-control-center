@@ -4,6 +4,8 @@ Follow the [Hive Mind Manager migration runbook](../../docs/hive-manager-migrati
 for the pinned release and supported deployment, diagnostics, recovery, and
 MTProxy commands. The [inventory](../../docs/case-studies/issue-1/README.md)
 lists release gaps and the live checks required before each caller moves.
+Use `node auto-fix.mjs --inspect-task-snapshot FILE` to summarize a saved
+start-command JSON list with the pinned manager library.
 
 ## Legacy fallbacks
 

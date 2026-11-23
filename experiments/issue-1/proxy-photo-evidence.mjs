@@ -1,20 +1,20 @@
-// Pass the 2.45.0 package's src/hive-manager/proxy/test.mjs as an absolute path.
+// Pass the pinned 2.48.0 package's src/hive-manager/proxy/test.mjs as an absolute path.
 import assert from 'node:assert/strict';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, URL } from 'node:url';
 
 const modulePath = process.argv[2];
 assert(modulePath, 'Supply the installed manager proxy probe module path');
-const { runProxyProbe } = await import(pathToFileURL(modulePath));
+const moduleUrl = pathToFileURL(modulePath);
+const { runProxyProbe } = await import(moduleUrl);
+const { createProbePhoto } = await import(new URL('./photo.mjs', moduleUrl));
 
-// An actual one-pixel PNG and a reply with the PNG signature followed by zeroes.
-const photo = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a4h4AAAAASUVORK5CYII=',
-  'base64'
-);
+// Keep the uploaded photo valid and return only the PNG signature and zeroes.
+const photo = createProbePhoto();
 const invalidReply = Buffer.alloc(24);
 photo.copy(invalidReply, 0, 0, 8);
 
 let message;
+let deleted;
 const client = {
   connect() {},
   checkAuthorization: () => true,
@@ -28,14 +28,15 @@ const client = {
   },
   getMessages: () => [message],
   downloadMedia: () => invalidReply,
-  deleteMessages() {},
+  deleteMessages(_recipient, ids) {
+    deleted = ids;
+  },
   destroy() {},
 };
 
-assert.deepEqual(await runProxyProbe(client, { photo, timeout: 1 }), {
-  text: true,
-  document: null,
-  photo: 24,
-  cleaned: true,
-});
-console.log('Hive Mind 2.45.0 accepted an invalid 24-byte photo reply.');
+await assert.rejects(
+  () => runProxyProbe(client, { photo, timeout: 1 }),
+  /Could not decode a bounded JPEG or PNG probe photo/
+);
+assert.deepEqual(deleted, [1, 2]);
+console.log('The pinned manager rejected an invalid 24-byte photo reply.');

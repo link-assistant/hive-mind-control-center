@@ -4,7 +4,7 @@ set -euo pipefail
 
 manager=$(command -v "${1:-hive-manager}")
 manager=$(realpath "$manager")
-[[ $("$manager" --version) == 2.45.0 ]]
+[[ $("$manager" --version) == 2.48.0 ]]
 
 umask 077
 work=$(mktemp -d)
@@ -21,8 +21,15 @@ git clone --quiet "$work/archive.git" seed
 
 legacy=example/project/codex/legacy.meta.json
 mkdir -p "seed/${legacy%/*}" bin codex
-printf '%s\n' '{"source":{"sha256":"legacy"}}' > "seed/$legacy"
-git -C seed add -- "$legacy"
+session_meta='{"type":"session_meta","payload":{"git":{"repository_url":"https://github.com/example/project.git"}}}'
+printf '%s\n' "$session_meta" > codex/legacy.jsonl
+cp codex/legacy.jsonl "seed/${legacy%.meta.json}.jsonl"
+sha=$(sha256sum codex/legacy.jsonl)
+sha=${sha%% *}
+size=$(wc -c < codex/legacy.jsonl)
+printf '{"tool":"codex","kind":"jsonl","repository":"example/project","source":{"sha256":"%s"},"files":[{"path":"%s","bytes":%s,"sha256":"%s"}]}\n' \
+  "$sha" "${legacy%.meta.json}.jsonl" "$size" "$sha" > "seed/$legacy"
+git -C seed add -- example/project
 git -C seed commit --quiet -m 'Seed legacy history'
 git -C seed push --quiet origin main
 base=$(git -C archive.git rev-parse main)
@@ -48,18 +55,30 @@ GH
 chmod +x bin/gh
 export PATH="$work/bin:$PATH"
 
-printf '%s\n' '{"type":"session_meta","payload":{"git":{"repository_url":"https://github.com/example/project.git"}}}' > codex/session.jsonl
-touch -t 202001010000 codex/session.jsonl
-stage=("$manager" archive-sessions --repo example/project --claude-dir empty \
-  --codex-dir codex --published-in example/archive --limit 1 --output)
+printf '%s\n' 'fixture-private-literal[example]' > known-secrets
+printf '%s\n' "$session_meta" '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"A synthetic fixture-private-literal[example] entry."}]}}' > codex/session.jsonl
+touch -t 202001010000 codex/legacy.jsonl codex/session.jsonl
+archive=("$manager" archive-sessions --repo example/project --claude-dir empty --codex-dir codex \
+  --known-secrets-file known-secrets --limit 1)
+import=("${archive[@]}" --import-legacy example/archive)
+"${import[@]}" > import.json
+digest=$(node -p 'const plan = require("./import.json"); if (plan.matches.length !== 1 || !plan.matches[0].metadata.endsWith("/legacy.meta.json")) process.exit(1); plan.digest')
+"${import[@]}" --apply "$digest"
+import_head=$(git -C archive.git rev-parse main)
+[[ $(git -C archive.git rev-parse 'main^') == "$base" ]]
+[[ $(git -C archive.git diff --name-only "$base" "$import_head") == example/project/.published/* ]]
+
+stage=("${archive[@]}" --published-in example/archive --output)
 "${stage[@]}" review
-publish=("$manager" archive-publish review --destination example/archive)
+[[ $(node -p 'require("./review/manifest.json").sessions.length') == 1 ]]
+if grep -qRFf known-secrets review; then exit 1; fi
+publish=("$manager" archive-publish review --destination example/archive --private --known-secrets-file known-secrets)
 "${publish[@]}" > plan.json
 digest=$(node -p 'const plan = require("./plan.json"); if (plan.visibility !== "private") process.exit(1); plan.digest')
 "${publish[@]}" --apply "$digest"
 head=$(git -C archive.git rev-parse main)
-[[ $(git -C archive.git rev-parse 'main^') == "$base" ]]
-git -C archive.git diff --name-only "$base" "$head" -- example/project/.published > index-changes
+[[ $(git -C archive.git rev-parse 'main^') == "$import_head" ]]
+git -C archive.git diff --name-only "$import_head" "$head" -- example/project/.published > index-changes
 [[ -s index-changes ]]
 "${stage[@]}" repeated
 [[ $(node -p 'require("./repeated/manifest.json").sessions.length') == 0 ]]
@@ -73,8 +92,8 @@ git clone --quiet "$work/archive.git" rollback
 git -C rollback revert --no-edit "$head"
 git -C rollback push --quiet origin main
 
-[[ $(git -C archive.git diff --name-only "$base" main) == other.txt ]]
+[[ $(git -C archive.git diff --name-only "$import_head" main) == other.txt ]]
 git -C archive.git merge-base --is-ancestor "$head" main
 "${stage[@]}" reverted
 [[ $(node -p 'require("./reverted/manifest.json").sessions.length') == 1 ]]
-printf '%s\n' 'Archive rollback preserved legacy history and concurrent changes, and removed the batch index.'
+printf '%s\n' 'Archive import and rollback preserved legacy history, its index and a concurrent change.'
