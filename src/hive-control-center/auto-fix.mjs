@@ -197,44 +197,30 @@
 //     ./auto-fix.mjs --collect <uuid> ...   or   --collect-matching formal-ai
 //   Change nothing anywhere, show what would happen: ./auto-fix.mjs --dry-run
 //     (also with --check-tasks: which browsers would be killed and why not)
+//   Inspect saved start-command records: ./auto-fix.mjs --inspect-task-snapshot FILE
 //   Report only, change nothing: ./auto-fix.mjs --no-resume --no-cleanup
 //     --no-repair-records --report-dry --dss-dry --no-fix-live-restore --no-follow
 //     --no-kill-stuck-browsers --no-fix-global-tools
 
-const { use } = eval(
-  await fetch('https://unpkg.com/use-m@8.16.4/use.js').then((u) => u.text())
-);
+import { writeFileSync } from 'node:fs';
 
-// Versions are pinned on purpose: an unpinned `command-stream` silently picked
-// up 2.0.0 (Node >=22, node-pty without linux-x64 prebuilds) and broke deploys
-// on Node 20 hosts without a build toolchain (link-foundation/command-stream#218).
-// Workaround for link-foundation/use-m#78: that failed install deleted the
-// `command-stream-v-latest` alias but left its bin symlink dangling, so every
-// later alias install died with EEXIST. Drop such a dead link before use().
-await (async () => {
-  const { execSync } = await import('node:child_process');
-  const { lstatSync, existsSync, readlinkSync, unlinkSync } =
-    await import('node:fs');
-  const { join } = await import('node:path');
+if (process.argv.includes('--inspect-task-snapshot', 2)) {
+  const file = process.argv[3];
+  if (process.argv[2] !== '--inspect-task-snapshot' || !file || file.startsWith('--') || process.argv.length !== 4) {
+    console.error('Usage: auto-fix.mjs --inspect-task-snapshot FILE');
+    process.exit(2);
+  }
   try {
-    const prefix = execSync('npm prefix -g', { encoding: 'utf8' }).trim();
-    const bin = join(
-      prefix,
-      process.platform === 'win32' ? '' : 'bin',
-      'command-stream'
-    );
-    if (
-      lstatSync(bin).isSymbolicLink() &&
-      !existsSync(bin) &&
-      readlinkSync(bin).includes('command-stream-v-')
-    ) {
-      unlinkSync(bin);
-    }
-  } catch {}
-})();
+    const { inspectTaskSnapshot } = await import('./scripts/manager-task-snapshot.mjs');
+    writeFileSync(1, JSON.stringify(await inspectTaskSnapshot(file), null, 2) + '\n');
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  }
+  process.exit(process.exitCode || 0);
+}
 
-const { $ } = await use('command-stream@1.6.2');
-const { makeConfig } = await use('lino-arguments@0.3.0');
+const { $, makeConfig } = await import('./scripts/legacy-runtime.mjs');
 const fs = await import('node:fs');
 
 const config = makeConfig({

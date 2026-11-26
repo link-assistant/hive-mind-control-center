@@ -522,7 +522,6 @@ const MTPROXY_REMOVE = MTPROXY_UNDEPLOY || MTPROXY_UNDEPLOY_TEMPORARY;
 const MTPROXY_ENGINE = String(config.mtproxyEngine || 'classic').toLowerCase();
 const MTPROXY_PORT = String(config.mtproxyPort || '443').trim();
 const MTPROXY_CONTAINER = MTPROXY_ENGINE === 'classic' ? `mtproxy-classic-${MTPROXY_PORT}` : 'mtproxy';
-const MTPROXY_CONTAINER_NAME_PATTERN = '^mtproxy(-classic(-[0-9]+)?(-old)?)?$';
 const MTPROXY_CONFIG_DIR = MTPROXY_ENGINE === 'classic' ? `/root/.hive-mtproxy-classic-${MTPROXY_PORT}` : '/root/.hive-mtproxy';
 const MTPROXY_LINK_PATH = `${MTPROXY_CONFIG_DIR}/link.txt`;
 
@@ -622,15 +621,6 @@ const ssh = async (command, { silent = false, ignoreErrors = false } = {}) => {
     log(`Command failed (code ${error.code}):`, error.message || error);
     if (!ignoreErrors) throw error;
   }
-};
-
-const listMtproxyContainers = async ({ runningOnly = false } = {}) => {
-  const command = `${runningOnly ? 'docker ps' : 'docker ps -a'} --format '{{.Names}}' | grep -E '${MTPROXY_CONTAINER_NAME_PATTERN}' || true`;
-  const result = await ssh(command, { silent: true, ignoreErrors: true });
-  return String(result?.stdout || '')
-    .split('\n')
-    .map((name) => name.trim())
-    .filter(Boolean);
 };
 
 // Like ssh(), but allocates a pseudo-TTY (-tt). Use this for the ONE long-lived
@@ -1811,8 +1801,22 @@ const nextStep = (msg) => {
 // and BEFORE the OS gate, reboot, readiness gate, backup/cleanup, Docker/Node
 // provisioning and the real hive-mind deploy. Nothing here may stop, restart,
 // prune, or overwrite the existing deployment.
-const MTPROXY_ONLY_REMOTE_DIR = '/root/.hive-mtproxy-only';
-const MTPROXY_UNDEPLOY_REMOTE_DIR = '/root/.hive-mtproxy-undeploy';
+const runStagedMtproxyDeploy = async (modeFlag, innerFlags) => {
+  const { stdout } = await ssh('mktemp -d /root/.hive-mtproxy.XXXXXXXX', { silent: true });
+  const stagingDir = stdout.trim();
+  if (!/^\/root\/\.hive-mtproxy\.[a-zA-Z0-9]{8}$/.test(stagingDir)) {
+    throw new Error('Could not obtain an isolated MTProxy staging directory');
+  }
+  note(`${modeFlag}: staging deploy-docker.mjs in ${stagingDir}`);
+  try {
+    await scp(resolve(__dirname, 'deploy-docker.mjs'), `${stagingDir}/deploy-docker.mjs`);
+    await scp(LENV_PATH, `${stagingDir}/.lenv`);
+    await ssh(`chmod 600 ${stagingDir}/.lenv`, { silent: true });
+    await sshTTY(`cd ${stagingDir} && exec node deploy-docker.mjs ${innerFlags}`);
+  } finally {
+    await ssh(`rm -rf ${stagingDir}`, { silent: true, ignoreErrors: true });
+  }
+};
 
 // Shared by the append-only and removal paths: verify the box is already
 // deployed without installing or changing anything, and confirm no other
@@ -1877,7 +1881,6 @@ const runMtproxyOnly = async () => {
   // Install/start the proxy only. Copy the current script + .lenv to an isolated
   // root-only directory so we never overwrite the deployment files in use.
   nextStep('MTProxy-only: installing or starting the proxy container');
-  note(`Using isolated staging dir ${MTPROXY_ONLY_REMOTE_DIR} (root-only; removed afterwards)`);
   const innerFlags = [
     '--mtproxy-only',
     config.mtproxyUpdate ? '--mtproxy-update' : '',
@@ -1891,15 +1894,7 @@ const runMtproxyOnly = async () => {
     config.mtproxyFrontingHost ? `--mtproxy-fronting-host ${JSON.stringify(config.mtproxyFrontingHost)}` : '',
     SHOW_SECRETS ? '--dangerously-show-secrets' : '',
   ].filter(Boolean).join(' ');
-  try {
-    await ssh(`rm -rf ${MTPROXY_ONLY_REMOTE_DIR} && mkdir -p ${MTPROXY_ONLY_REMOTE_DIR} && chmod 700 ${MTPROXY_ONLY_REMOTE_DIR}`, { silent: true });
-    await scp(resolve(__dirname, 'deploy-docker.mjs'), `${MTPROXY_ONLY_REMOTE_DIR}/deploy-docker.mjs`);
-    await scp(resolve(__dirname, '.lenv'), `${MTPROXY_ONLY_REMOTE_DIR}/.lenv`);
-    await ssh(`chmod 600 ${MTPROXY_ONLY_REMOTE_DIR}/.lenv && chmod +x ${MTPROXY_ONLY_REMOTE_DIR}/deploy-docker.mjs`, { silent: true });
-    await sshTTY(`cd ${MTPROXY_ONLY_REMOTE_DIR} && exec node deploy-docker.mjs ${innerFlags}`);
-  } finally {
-    await ssh(`rm -rf ${MTPROXY_ONLY_REMOTE_DIR}`, { silent: true, ignoreErrors: true });
-  }
+  await runStagedMtproxyDeploy('--mtproxy-only', innerFlags);
 
   const finalStatus = (await ssh(`docker inspect -f '{{.State.Status}}' ${MTPROXY_CONTAINER} 2>/dev/null || echo missing`, { silent: true, ignoreErrors: true }))?.stdout?.trim() || 'missing';
   if (finalStatus !== 'running') {
@@ -1918,11 +1913,7 @@ const runMtproxyUndeploy = async () => {
   const modeFlag = temporary ? '--mtproxy-undeploy-temporary' : '--mtproxy-undeploy';
   await mtproxyMaintenancePreflight(modeFlag);
 
-  const before = await listMtproxyContainers();
-  note(`MTProxy container(s) before ${modeFlag}: ${before.length ? before.join(', ') : 'none'}`);
-
-  nextStep(`${modeFlag}: ${temporary ? 'stopping' : 'removing'} the proxy container and MSS hook`);
-  note(`Using isolated staging dir ${MTPROXY_UNDEPLOY_REMOTE_DIR} (root-only; removed afterwards)`);
+  nextStep(`${modeFlag}: ${temporary ? 'stopping' : 'removing'} the proxy containers and MSS hook`);
   const innerFlags = [
     modeFlag,
     `--mtproxy-engine ${MTPROXY_ENGINE}`,
@@ -1930,31 +1921,9 @@ const runMtproxyUndeploy = async () => {
     config.mtproxyMss ? `--mtproxy-mss ${JSON.stringify(config.mtproxyMss)}` : '',
     config.mtproxyWorkers ? `--mtproxy-workers ${JSON.stringify(config.mtproxyWorkers)}` : '',
   ].filter(Boolean).join(' ');
-  try {
-    await ssh(`rm -rf ${MTPROXY_UNDEPLOY_REMOTE_DIR} && mkdir -p ${MTPROXY_UNDEPLOY_REMOTE_DIR} && chmod 700 ${MTPROXY_UNDEPLOY_REMOTE_DIR}`, { silent: true });
-    await scp(resolve(__dirname, 'deploy-docker.mjs'), `${MTPROXY_UNDEPLOY_REMOTE_DIR}/deploy-docker.mjs`);
-    await scp(resolve(__dirname, '.lenv'), `${MTPROXY_UNDEPLOY_REMOTE_DIR}/.lenv`);
-    await ssh(`chmod 600 ${MTPROXY_UNDEPLOY_REMOTE_DIR}/.lenv && chmod +x ${MTPROXY_UNDEPLOY_REMOTE_DIR}/deploy-docker.mjs`, { silent: true });
-    await sshTTY(`cd ${MTPROXY_UNDEPLOY_REMOTE_DIR} && exec node deploy-docker.mjs ${innerFlags}`);
-  } finally {
-    await ssh(`rm -rf ${MTPROXY_UNDEPLOY_REMOTE_DIR}`, { silent: true, ignoreErrors: true });
-  }
-
-  if (temporary) {
-    const running = await listMtproxyContainers({ runningOnly: true });
-    if (running.length) {
-      console.error(`>>> ERROR: MTProxy container(s) still running after the temporary undeploy: ${running.join(', ')}.`);
-      process.exit(1);
-    }
-    ok('All MTProxy containers stopped; containers, config, secret, and image preserved for --mtproxy-only');
-  } else {
-    const remaining = await listMtproxyContainers();
-    if (remaining.length) {
-      console.error(`>>> ERROR: MTProxy container(s) still exist after the undeploy: ${remaining.join(', ')}.`);
-      process.exit(1);
-    }
-    ok('All MTProxy containers removed; config/secret preserved for a stable-link redeploy');
-  }
+  // The target-side script verifies all legacy names and fails the SSH command
+  // if enumeration, the Docker operation, or the postcheck fails.
+  await runStagedMtproxyDeploy(modeFlag, innerFlags);
   ok('hive-mind and all other containers were never stopped, restarted, or modified');
 };
 

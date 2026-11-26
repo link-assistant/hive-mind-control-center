@@ -60,13 +60,13 @@ The `|| echo "..."` pattern in the hive-mind Dockerfile makes this invisible dur
 
 Move Playwright/Puppeteer system dependencies, CLI tools, and browser binary downloads here — all as `USER sandbox`, no sudo. This ensures `/workspace/.local` is created with correct ownership from the start.
 
-Tracked in: https://github.com/link-foundation/sandbox/issues/74
+Tracked in: https://github.com/link-foundation/box/issues/74
 
 ### 2. Essentials sandbox (`ubuntu/24.04/essentials-sandbox/install.sh`)
 
 Remove Playwright/Puppeteer system dependencies (~60 lines) and CLI installations — they move to the JS image. Essentials becomes focused on git, gh, glab, and git identity tools.
 
-Tracked in: https://github.com/link-foundation/sandbox/issues/74
+Tracked in: https://github.com/link-foundation/box/issues/74
 
 ### 3. Full sandbox (`Dockerfile`)
 
@@ -76,7 +76,7 @@ After all `COPY --from` operations (which run as root), restore `/workspace` own
 RUN chown sandbox:sandbox /workspace
 ```
 
-Tracked in: https://github.com/link-foundation/sandbox/issues/74
+Tracked in: https://github.com/link-foundation/box/issues/74
 
 ### 4. Hive-mind Dockerfile
 
