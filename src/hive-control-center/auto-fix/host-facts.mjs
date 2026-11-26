@@ -7,6 +7,7 @@
 // work left in its Git work dirs (a stopped container is mounted read-only
 // for that; it is never started), and the host's disk and memory now.
 // Writes the facts to PARAMS.out and prints one AF_JSON summary line.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,6 +19,87 @@ const run = (cmd, args, opts = {}) => {
 };
 const lines = (text, max) => text.split('\n').filter(Boolean).slice(-max);
 const SNAPSHOTS = '/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots';
+const sha256File = (file) => {
+  try {
+    const hash = crypto.createHash('sha256');
+    const fd = fs.openSync(file, 'r');
+    const buffer = Buffer.alloc(1024 * 1024);
+    let read;
+    while ((read = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, read));
+    fs.closeSync(fd);
+    return hash.digest('hex');
+  } catch {
+    return null;
+  }
+};
+const fileEntry = (dir, name, source) => {
+  const file = path.join(dir, name);
+  try {
+    const stat = fs.statSync(file);
+    return { name, bytes: stat.size, sha256: sha256File(file), source };
+  } catch {
+    return null;
+  }
+};
+const safeKey = (key) => String(key).replace(/[^\w.-]+/g, '_');
+const shellRun = (script, args, opts = {}) => run('bash', ['-c', script, 'auto-fix-evidence', ...args], { timeout: 300000, ...opts });
+const dockerLogsToFile = (name, since, until, file) => shellRun(
+  'args=(logs --timestamps); if [ -n "$1" ]; then args+=(--since "$1"); fi; if [ -n "$2" ]; then args+=(--until "$2"); fi; args+=("$3"); docker "${args[@]}" > "$4" 2>&1',
+  [since || '', until || '', name, file]
+);
+const tailFromFile = (file, max = 80) => {
+  try {
+    const fd = fs.openSync(file, 'r');
+    const { size } = fs.fstatSync(fd);
+    const length = Math.min(size, 512 * 1024);
+    const buffer = Buffer.alloc(length);
+    fs.readSync(fd, buffer, 0, length, size - length);
+    fs.closeSync(fd);
+    return buffer.toString('utf8').split('\n').filter(Boolean).slice(-max);
+  } catch {
+    return [];
+  }
+};
+const endsWithNewline = (file) => {
+  try {
+    const fd = fs.openSync(file, 'r');
+    const { size } = fs.fstatSync(fd);
+    if (!size) {
+      fs.closeSync(fd);
+      return true;
+    }
+    const byte = Buffer.alloc(1);
+    fs.readSync(fd, byte, 0, 1, size - 1);
+    fs.closeSync(fd);
+    return byte[0] === 0x0a;
+  } catch {
+    return null;
+  }
+};
+const journalToFile = (sinceS, untilS, file) => shellRun(
+  '{ echo "### system journal"; journalctl --since "@$1" --until "@$2" -o short-iso --no-pager; echo; echo "### docker and containerd"; journalctl -u docker -u containerd --since "@$1" --until "@$2" -o short-iso --no-pager; echo; echo "### kernel"; journalctl _TRANSPORT=kernel --since "@$1" --until "@$2" -o short-iso --no-pager; echo; echo "### boots"; journalctl --list-boots -o json --no-pager; } > "$3" 2>&1',
+  [String(sinceS), String(untilS), file]
+);
+const inspectToFile = (name, file) => shellRun('docker inspect "$1" > "$2" 2>&1', [name, file]);
+const gitEvidenceScript = `for d in "$1"/tmp/gh-issue-solver-*/; do
+  [ -e "$d/.git" ] || continue
+  g="git -c safe.directory=* -C $d"
+  echo "===== \${d#$1} ====="
+  echo "--- status"; $g status --porcelain=v2 --branch 2>&1
+  echo "--- diff --stat"; $g diff --stat 2>&1
+  echo "--- diff --cached --stat"; $g diff --cached --stat 2>&1
+  echo "--- log"; $g log -20 --oneline --decorate 2>&1
+  echo "--- remote"; $g remote -v 2>&1
+  echo "--- diff"; $g diff 2>&1 | head -c 1048576
+  echo; echo "--- diff --cached"; $g diff --cached 2>&1 | head -c 1048576
+  echo
+done`;
+const writeText = (file, text) => {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text, { mode: 0o600 });
+  } catch {}
+};
 
 const inspect = (name) => {
   const r = run('docker', ['inspect', name]);
@@ -43,12 +125,10 @@ const journal = (args, sinceS, untilS, pattern) =>
   lines(run('journalctl', [...args, '--since', '@' + sinceS, '--until', '@' + untilS, '-o', 'short-iso', '--no-pager']).out, 2000)
     .filter((l) => pattern.test(l));
 
-// Docker's own record of the container output (stdout and stderr), to compare
-// with the end of start-command's log file.
-const dockerLogsTail = (name) => {
-  const r = run('docker', ['logs', '--timestamps', '--tail', '80', name]);
-  return lines(r.out + '\n' + r.err, 80).sort();
-};
+// Docker's own record of the container output, with both descriptors on one
+// ordered stream. Separate stdout/stderr buffers lose the interleaving of a
+// long JSON record split around a stderr line; the file keeps Docker's order.
+const dockerLogsTail = (file) => tailFromFile(file, 80);
 
 // containerd's size walk fails (lstat ENOENT) when a running task deletes a
 // file during it, about one walk in six on a busy task: retry.
@@ -82,8 +162,9 @@ const parseGit = (out) => lines(out, 50).map((l) => {
 // A stopped container is mounted read-only from its snapshot. The layer list
 // is passed relative to the snapshots dir (like containerd does): 70+ absolute
 // layer paths overflow the 4 KiB mount options and the mount fails.
-const workState = (c) => {
+const workState = (c, evidenceFile = null) => {
   if (c.status === 'running') {
+    if (evidenceFile) writeText(evidenceFile, run('docker', ['exec', c.name, 'bash', '-c', gitEvidenceScript, 'git-evidence', '']).out);
     const r = run('docker', ['exec', c.name, 'bash', '-c', gitScript, 'git-state', '']);
     return { via: 'docker exec', repos: parseGit(r.out) };
   }
@@ -96,6 +177,7 @@ const workState = (c) => {
   try {
     const m = run('mount', ['-t', 'overlay', 'overlay', '-o', 'ro,lowerdir=' + rel(upper) + ':' + rel(lower), mnt], { cwd: SNAPSHOTS });
     if (m.code !== 0) return { via: 'read-only mount', error: m.err || 'mount failed' };
+    if (evidenceFile) writeText(evidenceFile, run('bash', ['-c', gitEvidenceScript, 'git-evidence', mnt]).out);
     return { via: 'read-only mount', repos: parseGit(run('bash', ['-c', gitScript, 'git-state', mnt]).out) };
   } finally {
     // A git process can still hold the mount for a moment: retry, then detach
@@ -134,13 +216,40 @@ const bootGaps = boots.slice(0, -1).map((b, i) => ({ bootId: b.boot_id, endedAt:
 const endedCleanly = (bootId) => /Journal stopped|systemd-shutdown|Reached target .*(Shutdown|Power-Off|Reboot)/
   .test(run('journalctl', ['-b', bootId, '-n', '15', '-o', 'short-iso', '--no-pager']).out);
 
+if (PARAMS.evidenceDir) {
+  fs.rmSync(PARAMS.evidenceDir, { recursive: true, force: true });
+  fs.mkdirSync(PARAMS.evidenceDir, { recursive: true, mode: 0o700 });
+}
 const facts = {};
 for (const ev of PARAMS.events) {
   const containers = ev.containerNames.map(inspect).filter(Boolean);
   const main = containers.find((c) => c.name === ev.sessionName) || null;
+  const dockerMain = main || containers[0] || null;
   const finished = Date.parse(ev.finishedAt || '') || Date.parse(main?.finishedAt || '') || Date.now();
   const t = Math.floor(finished / 1000);
   const shortId = main?.id?.slice(0, 12);
+  const evidenceDir = PARAMS.evidenceDir ? path.join(PARAMS.evidenceDir, safeKey(ev.key)) : null;
+  const evidenceFiles = [];
+  if (evidenceDir) {
+    fs.rmSync(evidenceDir, { recursive: true, force: true });
+    fs.mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
+    writeText(path.join(evidenceDir, 'event.json'), JSON.stringify(ev, null, 2) + '\n');
+    evidenceFiles.push(fileEntry(evidenceDir, 'event.json', 'auto-fix candidate event'));
+  }
+  const since = ev.startedAt || main?.startedAt || '';
+  const until = ev.finishedAt || main?.finishedAt || '';
+  if (evidenceDir) {
+    for (const c of containers) {
+      const name = c === dockerMain ? 'docker.log' : `docker-${c.name}.log`;
+      dockerLogsToFile(c.name, since, until, path.join(evidenceDir, name));
+      evidenceFiles.push(fileEntry(evidenceDir, name, `docker logs ${c.name} (${since || 'start'}..${until || 'end'})`));
+      const inspectName = c === dockerMain ? 'inspect.json' : `inspect-${c.name}.json`;
+      inspectToFile(c.name, path.join(evidenceDir, inspectName));
+      evidenceFiles.push(fileEntry(evidenceDir, inspectName, `docker inspect ${c.name}`));
+    }
+    journalToFile(t - 600, t + 300, path.join(evidenceDir, 'journal.log'));
+    evidenceFiles.push(fileEntry(evidenceDir, 'journal.log', `journal ${new Date((t - 600) * 1000).toISOString()}..${new Date((t + 300) * 1000).toISOString()}`));
+  }
   // `-k` means `-b -k`: only the current boot, so a kill just before a
   // reboot would be missed. The transport match spans every boot.
   const kernel = journal(['_TRANSPORT=kernel'], t - 600, t + 120, /Out of memory|oom-kill|oom_reaper|Memory cgroup out of memory|Killed process/);
@@ -164,10 +273,27 @@ for (const ev of PARAMS.events) {
       const at = Date.parse(l.split(' ')[0]);
       return /Main process exited|Started docker|Loading containers: start/.test(l) && Math.abs(at - finished) < 120000;
     }),
-    dockerLogsTail: main ? dockerLogsTail(main.name) : [],
+    dockerLogsTail: evidenceDir ? dockerLogsTail(path.join(evidenceDir, 'docker.log')) : main ? [] : [],
+    dockerLogsEndsWithNewline: evidenceDir ? endsWithNewline(path.join(evidenceDir, 'docker.log')) : null,
     layer: main ? layerUsage(main.id) : null,
-    work: main ? workState(main) : { via: 'none', error: 'container removed' },
+    work: main ? workState(main, evidenceDir ? path.join(evidenceDir, 'git.txt') : null) : { via: 'none', error: 'container removed' },
+    evidence: evidenceDir ? { dir: evidenceDir, files: evidenceFiles } : null,
   };
+  if (evidenceDir) {
+    const git = fileEntry(evidenceDir, 'git.txt', 'git status, diff, log and remotes');
+    if (git) evidenceFiles.push(git);
+    writeText(path.join(evidenceDir, 'facts.json'), JSON.stringify({ system, facts: facts[ev.key] }, null, 2) + '\n');
+    evidenceFiles.push(fileEntry(evidenceDir, 'facts.json', 'host facts for this attempt'));
+    const manifest = {
+      schema: 'auto-fix-incident-evidence-v1',
+      key: ev.key,
+      uuid: ev.uuid,
+      attempt: ev.attempt,
+      generatedAt: new Date().toISOString(),
+      files: evidenceFiles.filter(Boolean),
+    };
+    writeText(path.join(evidenceDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+  }
 }
 fs.mkdirSync(path.dirname(PARAMS.out), { recursive: true });
 fs.writeFileSync(PARAMS.out, JSON.stringify({ system, facts }));

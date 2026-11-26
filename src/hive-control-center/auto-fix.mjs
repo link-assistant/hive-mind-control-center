@@ -1311,25 +1311,42 @@ const reportDeadTasks = async () => {
     console.log(
       `>>>   ${ev.reason}: ${ev.url || ev.sessionName} attempt ${ev.attempt} (exit ${ev.exitCode ?? '?'}${ev.exitReason ? ', ' + ev.exitReason : ''})`
     );
+  const evidenceDir = '/root/auto-fix/evidence';
   await hostModule(HOST_FACTS_MODULE, {
     events,
     out: '/root/auto-fix/facts.json',
+    evidenceDir,
   });
   await ssh(
-    `docker cp /root/auto-fix/facts.json ${CONTAINER}:/tmp/auto-fix-facts.json && docker exec -u 0 ${CONTAINER} chmod 644 /tmp/auto-fix-facts.json`,
+    `docker exec -u 0 ${CONTAINER} rm -rf /tmp/auto-fix-evidence && docker cp /root/auto-fix/facts.json ${CONTAINER}:/tmp/auto-fix-facts.json && docker exec -u 0 ${CONTAINER} chmod 644 /tmp/auto-fix-facts.json`,
     { silent: true }
   );
-  const { results, errors } = await containerModuleDetached(REPORT_MODULE, {
-    mode: 'report',
-    events,
-    factsPath: '/tmp/auto-fix-facts.json',
-    dry: config.reportDry,
-    repo: config.reportRepo,
-    publicLogs: config.publicLogs,
-    uploadLogs: config.reportLogs,
-    maxReports: config.maxReports,
-    footer: ISSUE_FOOTER,
-  });
+  // Evidence is large and optional: a failed copy must not stop the report.
+  await ssh(
+    `if [ -d ${evidenceDir} ]; then docker cp ${evidenceDir} ${CONTAINER}:/tmp/auto-fix-evidence && docker exec -u 0 ${CONTAINER} chmod -R a+rX /tmp/auto-fix-evidence; fi`,
+    { silent: true, ignoreErrors: true }
+  );
+  let results = [];
+  let errors = [];
+  try {
+    ({ results, errors } = await containerModuleDetached(REPORT_MODULE, {
+      mode: 'report',
+      events,
+      factsPath: '/tmp/auto-fix-facts.json',
+      evidenceDir: '/tmp/auto-fix-evidence',
+      dry: config.reportDry,
+      repo: config.reportRepo,
+      publicLogs: config.publicLogs,
+      uploadLogs: config.reportLogs,
+      maxReports: config.maxReports,
+      footer: ISSUE_FOOTER,
+    }));
+  } finally {
+    await ssh(`docker exec -u 0 ${CONTAINER} rm -rf /tmp/auto-fix-evidence`, {
+      silent: true,
+      ignoreErrors: true,
+    });
+  }
   for (const r of results)
     console.log(
       `>>>   ${r.signature}: ${r.action}${r.url ? ' ' + r.url : ''}${r.preview ? ' (preview in the container: ' + r.preview + ')' : ''}  [${r.keys.length} attempt(s)]`

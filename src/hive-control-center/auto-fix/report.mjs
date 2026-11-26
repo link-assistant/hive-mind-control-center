@@ -46,9 +46,11 @@
 // blocks is not posted. With PARAMS.dry nothing is uploaded or posted: the
 // bodies are written to /tmp/auto-fix/report-preview-*.md instead.
 // Prints one AF_JSON line.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { execSync, execFileSync, spawnSync } from 'node:child_process';
 
 const sh = (command) => execSync(command, { shell: '/bin/bash', encoding: 'utf8' }).trim();
@@ -149,6 +151,7 @@ const attemptsOf = (e) => {
     startedAt: e.attempt?.startedAt || e.startTime,
     finishedAt: e.status === 'executing' ? null : e.endTime,
     command: e.command,
+    logOffset: e.attempt?.logOffset ?? e.logOffset ?? null,
   }];
 };
 
@@ -218,6 +221,7 @@ if (PARAMS.mode === 'candidates') {
         command: a.command,
         url: solveUrl(e.command),
         logPath: e.logPath || null,
+        logOffset: a.logOffset ?? null,
         containerNames: members.map((c) => c.Names),
       });
     }
@@ -419,27 +423,174 @@ const hiveVersion = JSON.parse(fs.readFileSync(dir + '/package.json', 'utf8')).v
 const startVersion = run(startCommand, ['--version']).out.split('\n')[0].replace(/^.*version:?\s*/i, '');
 const { system = {}, facts = {} } = PARAMS.factsPath && fs.existsSync(PARAMS.factsPath) ? JSON.parse(fs.readFileSync(PARAMS.factsPath, 'utf8')) : {};
 
-// The last `bytes` before `end` (default: the end of the file). One log holds
-// every attempt of an execution; an attempt's output ends where the next
-// attempt's `logOffset` begins.
-const readTail = (file, bytes, end = null) => {
+// --- report-logic:start ---
+// Read one attempt's slice of the shared execution log. `start` is the
+// attempt's `logOffset`; without it, an attempt after the first is ambiguous
+// and must not be classified from bytes that belong to an earlier attempt.
+// `clipped` means the attempt is larger than the read budget, so the wrapper
+// does not contain the whole interval Docker may still have.
+const readWindow = (file, start, stop, bytes) => {
   try {
     const fd = fs.openSync(file, 'r');
     const { size } = fs.fstatSync(fd);
-    const stop = end === null || end > size ? size : end;
-    const length = Math.min(stop, bytes);
+    const end = stop === null || stop === undefined || stop > size ? size : Math.max(0, stop);
+    const rawStart = start === null || start === undefined ? null : Math.max(0, start);
+    if (rawStart !== null && rawStart > end) {
+      fs.closeSync(fd);
+      return { size, start: rawStart, stop: end, from: end, text: '', bytes: 0, total: 0, clipped: false, ambiguous: true, invalid: true };
+    }
+    const begin = rawStart;
+    const from = begin === null ? Math.max(0, end - bytes) : Math.max(begin, end - bytes);
+    const length = Math.max(0, end - from);
     const buffer = Buffer.alloc(length);
-    fs.readSync(fd, buffer, 0, length, stop - length);
+    fs.readSync(fd, buffer, 0, length, from);
     fs.closeSync(fd);
-    return { size, text: buffer.toString('utf8') };
+    return {
+      size,
+      start: begin,
+      stop: end,
+      from,
+      text: buffer.toString('utf8'),
+      bytes: length,
+      total: begin === null ? null : end - begin,
+      clipped: begin !== null && from > begin,
+      ambiguous: begin === null,
+    };
   } catch {
-    return { size: null, text: '' };
+    return { size: null, start: null, stop: null, from: null, text: '', bytes: 0, total: null, clipped: false, ambiguous: true };
   }
 };
+const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
+const shortHash = (value) => sha256(value).slice(0, 12);
 const gb = (bytes) => (bytes / 2 ** 30).toFixed(1) + ' GiB';
 const fence = (lines) => '```\n' + (lines.length ? lines.join('\n') : '(none)') + '\n```';
 const clip = (line) => (line.length > 400 ? line.slice(0, 400) + ' …' : line);
 const stripTs = (line) => line.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z\s?/, '');
+const dockerLineTime = (line) => Date.parse((/^\d{4}-\d\d-\d\dT[\d:.]+Z/.exec(line) || [])[0] || '') || null;
+const attemptWindow = (attempt, now = Date.now()) => {
+  const start = Date.parse(attempt?.startedAt || '') || null;
+  let end = Date.parse(attempt?.finishedAt || '') || null;
+  if (!end && attempt?.status === 'executing') end = now;
+  return start && end && end >= start ? { start, end } : null;
+};
+const overlaps = (a, b) => !!a && !!b && a.start < b.end && b.start < a.end;
+
+// A failure is recovered by a later attempt in the same execution or by a
+// later execution of the same task. An execution that was already running when
+// this attempt started can also finish successfully, but it did not recover
+// this attempt: it superseded it. Keep those cases distinct so the report does
+// not say "no recovery" when the task actually finished elsewhere.
+const recoveryOutcome = (selected, ownLater = [], otherAttempts = []) => {
+  const selectedWindow = attemptWindow(selected);
+  const ownSuccess = ownLater.find((a) => a.exitCode === 0);
+  const ownRunning = ownLater.find((a) => a.status === 'executing');
+  if (ownSuccess) return 'yes: attempt ' + ownSuccess.number + ' finished with exit 0';
+  if (ownRunning) return 'in progress: attempt ' + ownRunning.number + ' is running';
+  const others = otherAttempts.filter((x) => x.window);
+  const after = selectedWindow ? others.filter((x) => x.window.start >= selectedWindow.end) : [];
+  const concurrent = selectedWindow ? others.filter((x) => overlaps(selectedWindow, x.window)) : [];
+  const ref = (x) => '`' + x.e.uuid + '` attempt ' + x.a.number;
+  const successAfter = after.find((x) => x.a.exitCode === 0);
+  if (successAfter) return 'yes: ' + ref(successAfter) + ' finished with exit 0 after this attempt';
+  const successConcurrent = concurrent.find((x) => x.a.exitCode === 0);
+  if (successConcurrent) return 'yes: a concurrent execution finished with exit 0';
+  const runningAfter = after.find((x) => x.a.status === 'executing');
+  if (runningAfter) return 'in progress: ' + ref(runningAfter) + ' is running';
+  const runningConcurrent = concurrent.find((x) => x.a.status === 'executing');
+  if (runningConcurrent) return 'in progress: a concurrent execution is still running';
+  if (ownLater.length) return 'no: ' + ownLater.length + ' later attempt(s) did not finish properly';
+  return 'no recovery attempt on record';
+};
+
+// Docker's own log for the same time window. The host now captures both
+// descriptors into one ordered stream; filtering by the attempt's timestamps
+// keeps rows from another attempt out of this comparison.
+const dockerLinesForAttempt = (f, ev) => {
+  const rows = Array.isArray(f?.dockerLogs) ? f.dockerLogs : Array.isArray(f?.dockerLogsTail) ? f.dockerLogsTail : [];
+  const start = Date.parse(ev.startedAt || '') || null;
+  const end = Date.parse(ev.finishedAt || '') || null;
+  if (!rows.length || !start || !end) return rows;
+  const inside = rows.filter((line) => {
+    const at = dockerLineTime(line);
+    return !at || (at >= start - 1000 && at <= end + 1000);
+  });
+  return inside.length ? inside : rows;
+};
+
+// A missing row is evidence of a difference, not automatically of data loss:
+// long JSON records, EOF fragments and a clipped wrapper interval are called
+// out separately, with sizes and digests instead of the payload repeated.
+const compareDocker = (wrapper, dockerRows, window, dockerMeta = {}) => {
+  if (!dockerRows.length) return { status: 'no-docker-log', rows: 0, missing: [], reason: 'Docker log is unavailable' };
+  if (window?.ambiguous) return { status: 'inconclusive', rows: dockerRows.length, missing: [], reason: 'the attempt start offset is unknown; the wrapper excerpt may contain an earlier attempt' };
+  if (window?.clipped) return { status: 'inconclusive', rows: dockerRows.length, missing: [], reason: `the wrapper attempt is larger than the ${(window.bytes / 2 ** 20).toFixed(1)} MiB read window; its start is clipped` };
+  const known = new Set(wrapper.split('\n').flatMap((line) => [line.trim(), stripTs(line).trim()]));
+  const missing = dockerRows
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => stripTs(line).trim() && !known.has(line.trim()) && !known.has(stripTs(line).trim()))
+    .map(({ line, index }) => ({
+      length: Buffer.byteLength(line),
+      sha256: shortHash(line),
+      preview: line.length <= 240 ? clip(line) : null,
+      eofFragment: dockerMeta.endsWithNewline === false && index === dockerRows.length - 1,
+    }));
+  return { status: missing.length ? 'differs' : 'matches', rows: dockerRows.length, missing };
+};
+const solverLogPrefix = /^\[\d{4}-\d\d-\d\dT[\d:.]+Z\] \[(?:INFO|ERROR|WARNING|WARN)\] /;
+const normalizeSolverText = (text) => text.split('\n')
+  .map((line) => line.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z /, '').replace(solverLogPrefix, '').trimEnd())
+  .join('\n');
+const localFailureSignature = (text) => {
+  const lines = normalizeSolverText(text).split('\n');
+  const maxOutputTokens = 'Incomplete response returned, reason: max_output_tokens';
+  const stoppedToolSession = /^❌ The AI session failed and (?:`--[\w-]+`|the automation) stopped \(tool_failure\)\.$/;
+  let executionError = null;
+  let outputLimitReported = false;
+  let expectToolFailureDetail = false;
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (expectToolFailureDetail && line === `   ${maxOutputTokens}`) outputLimitReported = true;
+    expectToolFailureDetail = false;
+    if (line.startsWith('Error executing command: ') || line.startsWith('Error: ')) {
+      const message = line.replace(/^Error(?: executing command)?: /, '');
+      if (/^Repository has uncommitted changes after clone(?:$|:| \(.+?\)$)/.test(message)) executionError = 'checkout-dirty';
+      else if (/^(?:Repository setup failed - empty repository|Empty repository auto-initialization failed|Empty repository detected - use --auto-init-repository to initialize)$/i.test(message)) executionError = 'repository-empty';
+      continue;
+    }
+    if (line.startsWith('🩹 PR #') && line.endsWith('run end (AI session failed (tool_failure))')) {
+      outputLimitReported = line.includes(`working session (${maxOutputTokens});`);
+      continue;
+    }
+    if (!line.startsWith('❌ ')) continue;
+    const verdict = line.slice(2);
+    if (/^Error: solve exited with code \d+$/.test(verdict)) continue;
+    if (/^Auto-restart limit reached after \d+ iterations? - the blocker was never resolved\.$/.test(verdict)) return 'auto-restart-limit';
+    if (/^(?:Repository setup failed - empty repository|Empty repository auto-initialization failed|Empty repository detected - use --auto-init-repository to initialize)$/i.test(verdict)) return 'repository-empty';
+    if (verdict === 'No progress between sessions') return 'no-progress';
+    if (verdict === 'Same CI failure repeated') return 'same-ci-failure';
+    if (verdict === 'Authentication error') return 'authentication';
+    if (verdict === 'Permission check failed') return 'repository-permission';
+    if (verdict === 'CODEX execution failed with ' + maxOutputTokens) return 'codex-max-output-tokens';
+    if (verdict.startsWith('CODEX execution failed with This content was flagged for possible cybersecurity risk.')) return 'tool-content-policy';
+    if (verdict === 'AI session failed (tool_failure)') return outputLimitReported ? 'codex-max-output-tokens' : 'tool-failure';
+    if (verdict === 'Error occurred' && executionError) return executionError;
+    executionError = null;
+    outputLimitReported = false;
+    expectToolFailureDetail = stoppedToolSession.test(line);
+  }
+  return null;
+};
+
+// --- report-logic:end ---
+
+const loadClassifier = async () => {
+  try {
+    const mod = await import(pathToFileURL(path.join(dir, 'src/task-failure-signature.lib.mjs')).href);
+    return typeof mod.classifyTaskFailure === 'function' ? mod.classifyTaskFailure : null;
+  } catch {
+    return null;
+  }
+};
 
 // Lines of the bot log about one task, without loading 20+ MB into memory.
 const botLines = (ev) => {
@@ -456,7 +607,7 @@ const redactAccounts = (text) => text
   .replace(/\b(user\.email|user\.account_id|account_id|organization_id|workspace_id)=("[^"]*"|\S+)/g, '$1=<redacted>')
   .replace(/[\w.+-]+@[\w-]+(\.[\w-]+)*\.[a-z]{2,}/gi, (m) => /@(users\.noreply\.github\.com|anthropic\.com)$/i.test(m) ? m : '<redacted-email>');
 
-const signatureOf = (ev, log, f) => {
+const signatureOf = (ev, log, f, window = null, classifier = null) => {
   if (ev.exitCode === 127 && /^\s*\/[\w-]+\s/.test(ev.command || '')) return 'alias-127';
   if (/no rollout found for thread id/i.test(log)) return 'codex-no-rollout';
   // The agent finished (result event), its CLI did not exit within the close
@@ -479,6 +630,20 @@ const signatureOf = (ev, log, f) => {
   // Docker resets State.OOMKilled when the container is started again for the
   // next attempt, so the cgroup's own counters in the log count too.
   if (ev.reason === 'failed' && f?.container?.memoryLimit && /exit code 137/.test(log) && (f?.container?.oomKilled || /oom_kill=[1-9]|OOM killer has killed [1-9]/.test(log))) return 'cgroup-oom';
+  // Ordinary exit-1 failures need the terminal verdict, not just the wrapper's
+  // reason. Use hive-mind's shared classifier when installed; the local
+  // fallback keeps the reporter useful in older installs.
+  if (ev.exitCode === 1 && !window?.ambiguous) {
+    const memoryExhausted = !!(f?.container?.oomKilled || f?.containerOomLines?.length || f?.globalOom?.length);
+    const attempt = { exitCode: ev.exitCode, command: ev.command, oomKilled: !!f?.container?.oomKilled, memoryExhausted };
+    let shared = null;
+    try {
+      shared = typeof classifier === 'function' ? classifier(attempt, log) : null;
+    } catch {}
+    if (shared) return shared;
+    const local = localFailureSignature(log);
+    if (local) return local;
+  }
   return ev.reason;
 };
 const KNOWN = {
@@ -503,6 +668,16 @@ const TITLES = {
   lost: 'Task lost: record says executing, but no container or watcher is left',
   'program-not-found': 'Task exited 127 (program not found)',
   'stream-close-timeout': 'Finished task reported as failed: the CLI was killed by the stream close timeout (exit 143)',
+  'repository-empty': 'Task failed: repository setup found an empty repository',
+  'checkout-dirty': 'Task failed: checkout left uncommitted changes',
+  'auto-restart-limit': 'Task failed: auto-restart limit reached',
+  'no-progress': 'Task failed: no progress between sessions',
+  'same-ci-failure': 'Task failed: the same CI failure repeated',
+  authentication: 'Task failed: authentication error',
+  'repository-permission': 'Task failed: repository permission check failed',
+  'codex-max-output-tokens': 'Codex stopped at the max output token limit',
+  'tool-content-policy': 'Codex stopped by the content policy',
+  'tool-failure': 'Task failed in the AI tool',
   failed: 'Task failed',
 };
 
@@ -518,41 +693,44 @@ const allExecutions = () => {
   return executionsCache;
 };
 
-const analyze = (ev) => {
+const analyze = async (ev) => {
   let status = null;
   try {
     status = listJson(['--status', ev.uuid, '--output-format', 'json']);
   } catch {}
   const f = facts[ev.key] || null;
   const attemptList = status ? attemptsOf(status) : [];
+  const current = attemptList.find((a) => a.number === ev.attempt);
   const next = attemptList.find((a) => a.number === ev.attempt + 1);
-  const tail = readTail(ev.logPath, 512 * 1024, Number.isFinite(next?.logOffset) && next.logOffset > 0 ? next.logOffset : null);
+  // An attempt's own logOffset is its start. Without it, attempt 2+ is
+  // ambiguous: the file also contains the earlier attempts' output.
+  const start = Number.isFinite(current?.logOffset) ? current.logOffset
+    : Number.isFinite(ev.logOffset) ? ev.logOffset
+    : ev.attempt === 1 ? 0 : null;
+  const stop = Number.isFinite(next?.logOffset) && next.logOffset >= 0 ? next.logOffset : null;
+  const tail = readWindow(ev.logPath, start, stop, 512 * 1024);
+  if (next && !Number.isFinite(next.logOffset)) tail.ambiguous = true;
   const all = tail.text.split('\n');
   // Lines of the agent's JSON stream (tool output, thinking signatures) are
   // left out: they only match by accident.
   const recovery = all.filter((l) => !/^\s*[{}"\]]/.test(l) && !/[A-Za-z0-9+\/=]{120,}/.test(l) && /\[HIVE-MIND RECOVERY\]|\[Start Command Lifecycle\]|exit code|exited with|Killed|OOM|out of memory|ENOSPC|No space left|heap limit|SIGKILL|SIGTERM/i.test(l) && !/(exited with|exit) code 0\b/i.test(l)).slice(-25).map(clip);
   const memory = all.filter((l) => /\b(memory|RSS|MemAvailable|heap)\b/i.test(l) && /\d/.test(l)).slice(-8).map(clip);
   const footer = all.filter(Boolean).slice(-30).map(clip);
-  // Lines Docker has that start-command's log file does not: the log is not
-  // complete when the container wrote more than reached the file.
-  // (start-command writes `docker logs --timestamps` lines; compare with and
-  // without the timestamp.)
-  const known = new Set(all.flatMap((l) => [l.trim(), stripTs(l).trim()]));
-  const missing = (f?.dockerLogsTail || []).filter((l) => stripTs(l).trim() && !known.has(l.trim()) && !known.has(stripTs(l).trim()));
+  const docker = compareDocker(tail.text, dockerLinesForAttempt(f, ev), tail, { endsWithNewline: f?.dockerLogsEndsWithNewline });
   const attempts = attemptList.map((a) => `${a.number}: ${a.status || '?'} exit ${a.exitCode ?? '?'}${a.exitReason ? ' (' + a.exitReason + ')' : ''} ${a.sessionName || ''} ${a.startedAt || ''} → ${a.finishedAt || ''}`);
   const later = attemptList.filter((a) => a.number > ev.attempt);
-  const last = later[later.length - 1];
-  const recovered = !later.length ? 'no recovery attempt on record'
-    : last.status === 'executing' ? 'in progress: attempt ' + last.number + ' is running'
-    : later.some((a) => a.exitCode === 0) ? 'yes: attempt ' + later.find((a) => a.exitCode === 0).number + ' finished with exit 0'
-    : 'no: ' + later.length + ' later attempt(s) did not finish properly';
-  // Another execution of the same task that ran while this one was being
-  // recovered: two solve processes on one pull request (hive-mind#3530).
-  const until = Date.parse(last?.finishedAt || '') || Date.now();
-  const concurrent = ev.url ? allExecutions().filter((e) => e.uuid !== ev.uuid && solveUrl(e.command) === ev.url
-    && Date.parse(e.startTime || '') > (Date.parse(ev.startedAt || '') || 0) && Date.parse(e.startTime || '') < until) : [];
-  const duplicates = concurrent.map((e) => `\`${e.uuid}\` ${e.startTime} → ${e.endTime || 'running'}, exit ${e.exitCode ?? '?'}`);
-  return { status, f, tail, recovery, memory, footer, missing, attempts, recovered: recovered + (duplicates.length ? '; **another execution of the same task ran at the same time: ' + duplicates.join('; ') + '**' : ''), log: tail.text, signature: signatureOf(ev, tail.text, f) };
+  // Actual attempt windows, not "started after this one": a sequential retry
+  // is not concurrent, and a run already in progress when this attempt started
+  // is. Boundary-touching intervals do not overlap.
+  const selectedWindow = attemptWindow({ startedAt: ev.startedAt, finishedAt: ev.finishedAt, status: ev.status });
+  const otherAttempts = selectedWindow && ev.url ? allExecutions()
+    .filter((e) => e.uuid !== ev.uuid && solveUrl(e.command) === ev.url)
+    .flatMap((e) => attemptsOf(e).map((a) => ({ e, a, window: attemptWindow(a) }))) : [];
+  const concurrent = otherAttempts.filter(({ window }) => overlaps(selectedWindow, window));
+  const recovered = recoveryOutcome(ev, later, otherAttempts);
+  const duplicates = concurrent.map(({ e, a, window }) => `\`${e.uuid}\` attempt ${a.number} ${new Date(window.start).toISOString()} → ${new Date(window.end).toISOString()}, exit ${a.exitCode ?? '?'}`);
+  const classifier = await loadClassifier();
+  return { status, f, tail, window: tail, docker, recovery, memory, footer, attempts, recovered: recovered + (duplicates.length ? '; **another execution of the same task overlapped this attempt: ' + duplicates.join('; ') + '**' : ''), log: tail.text, signature: signatureOf(ev, tail.text, f, tail, classifier) };
 };
 
 const section = (ev, a, links) => {
@@ -561,6 +739,22 @@ const section = (ev, a, links) => {
   const work = repos.length
     ? repos.map((r) => `- \`${r.dir}\` on \`${r.branch || '?'}\`: ${r.dirtyFiles} uncommitted file(s), ${r.unpushedCommits ?? '?'} unpushed commit(s)${r.submoduleDirtyFiles || r.submoduleUnpushedCommits ? `; **in submodules: ${r.submoduleDirtyFiles} uncommitted file(s), ${r.submoduleUnpushedCommits} commit(s) on no remote**` : ''}, last commit ${r.lastCommit || '?'}`).join('\n')
     : '- ' + (a.f?.work?.error || 'no solver work dir found') + ' (checked via ' + (a.f?.work?.via || 'none') + ')';
+  const w = a.window || a.tail || {};
+  const interval = w.ambiguous
+    ? 'start offset unavailable; the excerpt may contain an earlier attempt'
+    : `${w.start ?? '?'}–${w.stop ?? '?'} bytes${w.clipped ? `; clipped at ${w.bytes} bytes of ${w.total}` : ''}`;
+  const docker = a.docker || { status: 'no-docker-log', rows: 0, missing: [] };
+  const dockerText = docker.status === 'matches'
+    ? `matches the wrapper (${docker.rows} rows)`
+    : docker.status === 'differs'
+      ? `**${docker.missing.length} unmatched row(s)** of ${docker.rows}; see digests below`
+      : docker.status === 'inconclusive'
+        ? `comparison inconclusive: ${docker.reason}`
+        : docker.reason || 'unavailable';
+  const evidence = links.evidence ? `[bundle](${links.evidence})` : 'not uploaded';
+  const dockerStream = links.dockerStream ? `[Docker stream](${links.dockerStream})` : 'not uploaded';
+  const inventory = (a.evidence?.files || []).map((f) => `- \`${f.name}\`: ${f.bytes} bytes, sha256 \`${f.sha256}\`${f.source ? ` (from ${f.source})` : ''}`);
+  const missingRows = docker.missing.map((m) => `- ${m.length} bytes, sha256 \`${m.sha256}\`${m.preview ? `: \`${m.preview}\`` : ''}${m.eofFragment ? ' (EOF fragment)' : ''}`);
   return [
     `### ${ev.url || ev.sessionName} — attempt ${ev.attempt}`,
     '',
@@ -574,7 +768,9 @@ const section = (ev, a, links) => {
     ...(a.f?.hostReboot ? [`| Host | ${a.f.hostReboot.clean ? 'rebooted' : '**hard reset**: the journal stops'} at ${a.f.hostReboot.lastEntryAt}${a.f.hostReboot.clean ? '' : ' with no shutdown'}; next boot ${a.f.hostReboot.nextBootAt} |`] : []),
     `| Writable layer | ${a.f?.layer || '?'} |`,
     `| Auto-recovered | ${a.recovered} |`,
-    `| start-command log | ${a.tail.size === null ? 'missing' : (a.tail.size / 2 ** 20).toFixed(1) + ' MiB'}${links.log ? ' — [uploaded](' + links.log + ')' : ''}; ${a.missing.length ? '**' + a.missing.length + ' of the last ' + (a.f?.dockerLogsTail?.length || 0) + ' Docker log lines are not in it**' : 'ends like Docker\'s own log'} |`,
+    `| Wrapper log | ${w.size === null ? 'missing' : (w.size / 2 ** 20).toFixed(1) + ' MiB total'}; attempt ${interval}${links.log ? ' — [uploaded](' + links.log + ')' : ''} |`,
+    `| Docker stream | ${dockerText} |`,
+    `| Evidence | ${evidence} · ${dockerStream}${links.manifest ? ' · [manifest](' + links.manifest + ')' : ''} |`,
     '',
     '**Work left in the container**',
     '',
@@ -597,7 +793,14 @@ const section = (ev, a, links) => {
     '',
     fence(a.memory),
     fence(a.footer),
-    a.missing.length ? '\nIn Docker\'s log only:\n\n' + fence(a.missing.slice(-20).map(clip)) : '',
+    '',
+    '</details>',
+    '',
+    '<details><summary>Evidence inventory and Docker tail comparison</summary>',
+    '',
+    inventory.length ? inventory.join('\n') : '- no evidence files were collected',
+    '',
+    missingRows.length ? 'Unmatched Docker rows (payload omitted; lengths and digests are enough to find them in the uploaded stream):\n\n' + missingRows.join('\n') : '',
     '',
     '</details>',
     '',
@@ -649,6 +852,8 @@ const reportedOnGitHub = (ev) => {
   return null;
 };
 
+const results = [];
+const errors = [];
 const uploadedLogs = new Map();
 const upload = async (file, description, uuid = null) => {
   if (PARAMS.dry || PARAMS.uploadLogs === false || !file || !fs.existsSync(file)) return null;
@@ -663,9 +868,87 @@ const upload = async (file, description, uuid = null) => {
   return result?.success ? result.url : null;
 };
 
-const results = [];
-const errors = [];
-const analyzed = PARAMS.events.map((ev) => ({ ev, a: analyze(ev) }));
+const evidenceKey = (ev) => String(ev.key).replace(/[^\w.-]+/g, '_');
+const readTextFile = (file, maxBytes = Infinity) => {
+  try {
+    const fd = fs.openSync(file, 'r');
+    const { size } = fs.fstatSync(fd);
+    const length = Math.min(size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    fs.readSync(fd, buffer, 0, length, 0);
+    fs.closeSync(fd);
+    return buffer.toString('utf8');
+  } catch {
+    return null;
+  }
+};
+const botEvidenceLines = (ev) => {
+  const patterns = [ev.uuid, ev.sessionName, ...(ev.containerNames || [])].filter(Boolean);
+  if (!patterns.length) return [];
+  const r = run('grep', ['-F', ...patterns.flatMap((p) => ['-e', p]), BOT_LOG]);
+  const from = (Date.parse(ev.startedAt || '') || 0) - 60000;
+  const to = (Date.parse(ev.finishedAt || '') || 0) + 300000;
+  return r.out.split('\n').filter((line) => {
+    if (!line || line.startsWith('[telegram-send]')) return false;
+    const at = Date.parse(line.slice(0, 24));
+    return !at || !from || (at >= from && at <= to);
+  }).slice(-5000).map((line) => line.replace(/\bchat[=:]\s*"?-?\d+/gi, 'chat=<redacted>').slice(0, 2000));
+};
+const buildEvidenceBundle = (ev, a, dir, manifest) => {
+  const parts = [
+    '# auto-fix incident evidence',
+    '',
+    `- key: ${ev.key}`,
+    `- execution: ${ev.uuid}`,
+    `- attempt: ${ev.attempt}`,
+    `- session: ${ev.sessionName || '?'}`,
+    `- task: ${ev.url || '?'}`,
+    `- generated: ${new Date().toISOString()}`,
+    `- hive-mind: ${hiveVersion}`,
+    `- start-command: ${startVersion}`,
+    '',
+    '## Start-command record',
+    '',
+    '```json',
+    JSON.stringify(a.status, null, 2),
+    '```',
+    '',
+    '## Manifest',
+    '',
+    '```json',
+    JSON.stringify(manifest, null, 2),
+    '```',
+  ];
+  for (const file of manifest.files || []) {
+    if (file.name === 'docker.log') continue;
+    const limit = 4 * 1024 * 1024;
+    const text = readTextFile(path.join(dir, file.name), limit);
+    if (text === null) continue;
+    const clipped = file.bytes > limit;
+    parts.push('', `## ${file.name}`, '', `bytes: ${file.bytes}; sha256: ${file.sha256}${clipped ? `; excerpt: first ${limit} bytes` : ''}`, '', '```', clipped ? text.slice(0, limit) : text, '```');
+  }
+  const bots = botEvidenceLines(ev);
+  if (bots.length) parts.push('', '## Bot log lines', '', '```', bots.join('\n'), '```');
+  return parts.join('\n');
+};
+const uploadEvidence = async (ev, a) => {
+  const dir = PARAMS.evidenceDir ? path.join(PARAMS.evidenceDir, evidenceKey(ev)) : null;
+  if (!dir || !fs.existsSync(dir)) return { files: [] };
+  let manifest = null;
+  try {
+    manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
+  } catch {}
+  const files = manifest?.files || [];
+  const bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'af-evidence-'));
+  const bundleFile = path.join(bundleDir, 'evidence.md');
+  fs.writeFileSync(bundleFile, buildEvidenceBundle(ev, a, dir, manifest || { files }), { mode: 0o600 });
+  const bundle = await upload(bundleFile, `${ev.url || ev.sessionName} execution ${ev.uuid} attempt ${ev.attempt} evidence bundle`, null);
+  fs.rmSync(bundleDir, { recursive: true, force: true });
+  const dockerFile = path.join(dir, 'docker.log');
+  const dockerStream = fs.existsSync(dockerFile) ? await upload(dockerFile, `${ev.url || ev.sessionName} execution ${ev.uuid} attempt ${ev.attempt} Docker stream`, null) : null;
+  return { bundle, dockerStream, manifest: bundle, files };
+};
+const analyzed = await Promise.all(PARAMS.events.map(async (ev) => ({ ev, a: await analyze(ev) })));
 const groups = new Map();
 for (const item of analyzed) {
   let url;
@@ -725,7 +1008,9 @@ for (const [signature, items] of [...groups].slice(0, PARAMS.maxReports)) {
     const sections = [];
     for (const { ev, a } of items) {
       const log = await upload(ev.logPath, `${ev.url || ev.sessionName} execution ${ev.uuid} (auto-fix report)`, ev.uuid);
-      sections.push(section(ev, a, { log }));
+      const evidence = await uploadEvidence(ev, a);
+      a.evidence = evidence;
+      sections.push(section(ev, a, { log, evidence: evidence.bundle, dockerStream: evidence.dockerStream, manifest: evidence.manifest }));
     }
     const intro = [
       target ? `auto-fix found ${items.length} more task attempt(s) with this signature.` : `auto-fix found ${items.length} task attempt(s) that died with signature **${signature}**.`,
