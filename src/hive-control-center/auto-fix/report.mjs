@@ -120,6 +120,63 @@ const uploadExecutionLog = (id) => {
   const url = (/🔗\s*(https:\/\/\S+)/.exec(r.out) || /(https:\/\/(?:gist\.)?github\.com\/\S+)/.exec(r.out) || [])[1] || null;
   return r.code === 0 && url ? { url } : { error: (r.err || r.out).split('\n').filter(Boolean).pop() || 'exit ' + r.code };
 };
+// A large log can hold several long encoded-looking runs in one block. The
+// publication sanitizer masks each run but its residual rounds then refuse the
+// block as a whole (sensitive-data-sanitizer's encoded-limit false positive).
+// Split only that failing block at the detected spans, sanitize the pieces, and
+// let gh-upload-log verify the concatenated result. Every other block stays
+// byte-identical and the fail-closed scan still runs over every byte.
+let resilientSanitizer;
+const getResilientSanitizer = async () => {
+  if (resilientSanitizer) return resilientSanitizer;
+  let dir = path.dirname(fs.realpathSync(sh('command -v hive-telegram-bot')));
+  while (dir !== '/' && !(fs.existsSync(dir + '/package.json') && JSON.parse(fs.readFileSync(dir + '/package.json', 'utf8')).name === '@link-assistant/hive-mind')) dir = path.dirname(dir);
+  const { sanitizeForPublication } = await import(dir + '/src/token-sanitization.lib.mjs');
+  const { forEachLogBlock } = await import(dir + '/src/log-sanitize-stream.lib.mjs');
+  const { findCredentialFindings } = await import(dir + '/src/sensitive-data-sanitizer.lib.mjs');
+  const sanitizePiece = async (text, depth = 0) => {
+    if (!text) return '';
+    try {
+      return String(await sanitizeForPublication(text));
+    } catch (error) {
+      if (depth >= 40 || text.length <= 1) throw error;
+      let findings = [];
+      try {
+        findings = findCredentialFindings(text);
+      } catch {}
+      const cuts = [...new Set([0, ...findings.flatMap((f) => [f.start, f.end]), text.length])]
+        .filter((v) => Number.isInteger(v) && v >= 0 && v <= text.length)
+        .sort((a, b) => a - b);
+      if (cuts.length > 2) {
+        let out = '';
+        for (let i = 0; i < cuts.length - 1; i++) out += await sanitizePiece(text.slice(cuts[i], cuts[i + 1]), depth + 1);
+        return out;
+      }
+      const middle = Math.floor(text.length / 2);
+      let cut = text.lastIndexOf('\n', middle);
+      if (cut < text.length * 0.25) cut = text.indexOf('\n', middle);
+      if (cut <= 0 || cut >= text.length) cut = middle;
+      return (await sanitizePiece(text.slice(0, cut), depth + 1)) + (await sanitizePiece(text.slice(cut), depth + 1));
+    }
+  };
+  resilientSanitizer = async ({ sourcePath, destPath }) => {
+    const dest = await fs.promises.open(destPath, 'wx', 0o600);
+    let charsWritten = 0;
+    try {
+      await forEachLogBlock(sourcePath, async (text) => {
+        const out = await sanitizePiece(text);
+        if (!out) return;
+        await dest.write(out, null, 'utf8');
+        charsWritten += out.length;
+      });
+      await dest.chmod(0o600);
+      return { charsWritten };
+    } finally {
+      await dest.close().catch(() => {});
+    }
+  };
+  return resilientSanitizer;
+};
 const solveUrl = (command) => (/(https:\/\/github\.com\/[^\s'"]+\/(?:issues|pull)\/\d+)/.exec(command || '') || [])[1] || null;
 const argOf = (command, name) => (new RegExp(`'?--${name}'?[ =]'?([\\w.:/-]+)`).exec(command || '') || [])[1] || null;
 // Only the fields used: `{{json .}}` also asks dockerd for every container's
@@ -407,8 +464,9 @@ if (PARAMS.mode === 'candidates') {
       while (dir !== '/' && !(fs.existsSync(dir + '/package.json') && JSON.parse(fs.readFileSync(dir + '/package.json', 'utf8')).name === '@link-assistant/hive-mind')) dir = path.dirname(dir);
       const { uploadLogWithGhUploadLog } = await import(dir + '/src/log-upload.lib.mjs');
       const uploadable = botLogForUpload();
-      const result = await uploadLogWithGhUploadLog({ logFile: uploadable.file, isPublic: !!PARAMS.publicLogs, description: `hive-telegram-bot log${uploadable.tail ? ' tail' : ''} (auto-fix collect)` });
-      botLog = result?.success ? result.url : 'upload failed';
+      const sanitize = await getResilientSanitizer();
+      const result = await uploadLogWithGhUploadLog({ logFile: uploadable.file, isPublic: !!PARAMS.publicLogs, description: `hive-telegram-bot log${uploadable.tail ? ' tail' : ''} (auto-fix collect)`, sanitize });
+      botLog = result?.success ? result.url : 'upload failed: ' + (result?.failureReason || 'no URL');
     } catch (error) {
       botLog = 'upload failed: ' + (error.message || String(error)).split('\n')[0];
     }
@@ -610,6 +668,7 @@ const redactAccounts = (text) => text
 const signatureOf = (ev, log, f, window = null, classifier = null) => {
   if (ev.exitCode === 127 && /^\s*\/[\w-]+\s/.test(ev.command || '')) return 'alias-127';
   if (/no rollout found for thread id/i.test(log)) return 'codex-no-rollout';
+  if (/CODEX execution failed with Sanitization failed; output was blocked\./.test(log)) return 'tool-sanitization';
   // The agent finished (result event), its CLI did not exit within the close
   // timeout, and the SIGTERM exit code turned the run into a failure.
   if (ev.reason === 'failed' && /Result event received/.test(log) && /Stream timeout/.test(log) && /failed with exit code 143/.test(log)) return 'stream-close-timeout';
@@ -677,6 +736,7 @@ const TITLES = {
   'repository-permission': 'Task failed: repository permission check failed',
   'codex-max-output-tokens': 'Codex stopped at the max output token limit',
   'tool-content-policy': 'Codex stopped by the content policy',
+  'tool-sanitization': 'Codex output blocked by the sanitizer',
   'tool-failure': 'Task failed in the AI tool',
   failed: 'Task failed',
 };
@@ -844,10 +904,19 @@ const reportedOnGitHub = (ev) => {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2100); // search API: 30 requests a minute
   const owner = PARAMS.repo.split('/')[0];
   const mentions = ghJson('api', '-X', 'GET', 'search/issues', '-f', `q=${[...new Set(ids)].join(' OR ')} org:${owner} in:body,comments`, '-q', '[.items[] | {repo: (.repository_url | split("/") | .[-2:] | join("/")), number}]');
+  // Only a mention written after this attempt ended can report it. An issue
+  // created earlier may name the same task container for an unrelated problem
+  // (hive-mind#4165 named 6d6c7327 for a stale image digest), and must not
+  // hide this attempt's failure.
+  const finishedAt = Date.parse(ev.finishedAt || '') || 0;
+  const reportsThisAttempt = (text, at) =>
+    text &&
+    !text.includes('auto-fix-key:') &&
+    ids.some((id) => text.includes(id)) &&
+    (Date.parse(at || '') || 0) >= finishedAt;
   for (const { repo, number } of mentions || []) {
-    const issue = ghJson('issue', 'view', String(number), '-R', repo, '--json', 'body,comments,url');
-    const texts = [issue.body, ...(issue.comments || []).map((c) => c.body)];
-    if (texts.some((t) => t && !t.includes('auto-fix-key:') && ids.some((id) => t.includes(id)))) return issue.url;
+    const issue = ghJson('issue', 'view', String(number), '-R', repo, '--json', 'body,comments,url,createdAt');
+    if (reportsThisAttempt(issue.body, issue.createdAt) || (issue.comments || []).some((c) => reportsThisAttempt(c.body, c.createdAt))) return issue.url;
   }
   return null;
 };
@@ -864,7 +933,9 @@ const upload = async (file, description, uuid = null) => {
     if (up.url) return up.url;
     errors.push(`$ --upload-log ${uuid}: ${up.error}; used hive-mind's uploader`);
   }
-  const result = await uploadLogWithGhUploadLog({ logFile: file, isPublic: !!PARAMS.publicLogs, description });
+  const sanitize = await getResilientSanitizer();
+  const result = await uploadLogWithGhUploadLog({ logFile: file, isPublic: !!PARAMS.publicLogs, description, sanitize });
+  if (!result?.success) errors.push(`gh-upload-log ${description}: ${result?.failureReason || 'no URL'}`);
   return result?.success ? result.url : null;
 };
 
